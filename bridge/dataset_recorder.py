@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""Record synchronized web teleoperation samples as a LeRobot dataset."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import signal
+import sys
+import time
+from pathlib import Path
+
+DEFAULT_JOINT_NAMES = [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+]
+
+_DEPS_LOADED = False
+
+
+def emit(message: dict) -> None:
+    print(json.dumps(message, ensure_ascii=False), flush=True)
+
+
+def terminate(_signum, _frame) -> None:
+    raise SystemExit(143)
+
+
+def load_dependencies(args: argparse.Namespace) -> None:
+    global _DEPS_LOADED
+    global cv2, np, LeRobotDataset
+    global cancel_dataset, capabilities, create_dataset, finalize_dataset, resume_dataset
+
+    if _DEPS_LOADED:
+        return
+
+    import cv2
+    import numpy as np
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot_dataset_compat import (
+        cancel_dataset,
+        capabilities,
+        create_dataset,
+        finalize_dataset,
+        resume_dataset,
+    )
+
+    dataset_capabilities = capabilities()
+    args.streaming_encoding = args.streaming_encoding == "on" or (
+        args.streaming_encoding == "auto" and dataset_capabilities.streaming_encoding
+    )
+    args.vcodec = args.vcodec or None
+    _DEPS_LOADED = True
+
+
+def decode_image(encoded: str) -> np.ndarray:
+    data = np.frombuffer(base64.b64decode(encoded), dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("无法解码摄像头 JPEG 帧")
+    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def vector(joints: dict, joint_names: list[str]) -> np.ndarray:
+    missing = [name for name in joint_names if name not in joints]
+    if missing:
+        raise ValueError(f"关节数据不完整: {', '.join(missing)}")
+    unexpected = [name for name in joints if name not in joint_names]
+    if unexpected:
+        raise ValueError(f"关节集合在录制期间发生变化: {', '.join(unexpected)}")
+    return np.asarray([joints[name] for name in joint_names], dtype=np.float32)
+
+
+def dataset_features(camera: np.ndarray, camera2: np.ndarray, joint_names: list[str]) -> dict:
+    return {
+        "observation.state": {"dtype": "float32", "shape": (len(joint_names),), "names": joint_names},
+        "action": {"dtype": "float32", "shape": (len(joint_names),), "names": joint_names},
+        "observation.images.camera1": {
+            "dtype": "video",
+            "shape": camera.shape,
+            "names": ["height", "width", "channel"],
+        },
+        "observation.images.camera2": {
+            "dtype": "video",
+            "shape": camera2.shape,
+            "names": ["height", "width", "channel"],
+        },
+    }
+
+
+def match_camera_to_existing_dataset(
+    root: str | Path, camera: np.ndarray, camera2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """续录旧数据集时把新摄像头帧缩放到原数据集的视频尺寸。"""
+    root_path = Path(root).expanduser().resolve()
+    info_file = root_path / "meta" / "info.json"
+    if not info_file.is_file():
+        return camera, camera2
+
+    try:
+        info = json.loads(info_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return camera, camera2
+
+    features = info.get("features", {}) if isinstance(info, dict) else {}
+    shape1 = features.get("observation.images.camera1", {}).get("shape") if isinstance(
+        features.get("observation.images.camera1"), dict
+    ) else None
+    shape2 = features.get("observation.images.camera2", {}).get("shape") if isinstance(
+        features.get("observation.images.camera2"), dict
+    ) else None
+
+    if isinstance(shape1, (list, tuple)) and len(shape1) >= 2:
+        width, height = int(shape1[1]), int(shape1[0])
+        if width > 0 and height > 0 and camera.shape[:2] != (height, width):
+            camera = cv2.resize(camera, (width, height))
+    if isinstance(shape2, (list, tuple)) and len(shape2) >= 2:
+        width, height = int(shape2[1]), int(shape2[0])
+        if width > 0 and height > 0 and camera2.shape[:2] != (height, width):
+            camera2 = cv2.resize(camera2, (width, height))
+    return camera, camera2
+
+
+def open_dataset(
+    args: argparse.Namespace, camera: np.ndarray, camera2: np.ndarray, joint_names: list[str]
+) -> LeRobotDataset:
+    root = Path(args.root).expanduser().resolve()
+    info_file = root / "meta" / "info.json"
+    expected_features = dataset_features(camera, camera2, joint_names)
+
+    if info_file.exists():
+        dataset = resume_dataset(
+            repo_id=args.repo_id,
+            root=root,
+            streaming_encoding=args.streaming_encoding,
+            vcodec=args.vcodec,
+        )
+        if dataset.fps != args.fps:
+            raise ValueError(f"已有数据集 FPS 为 {dataset.fps}，不能用 {args.fps} FPS 续录")
+        for key, expected in expected_features.items():
+            actual = dataset.features.get(key)
+            if (
+                actual is None
+                or tuple(actual["shape"]) != tuple(expected["shape"])
+                or actual.get("names") != expected.get("names")
+            ):
+                raise ValueError(f"已有数据集特征不兼容: {key}")
+        return dataset
+
+    root.parent.mkdir(parents=True, exist_ok=True)
+    return create_dataset(
+        repo_id=args.repo_id,
+        fps=args.fps,
+        root=root,
+        robot_type=args.robot_type,
+        features=expected_features,
+        streaming_encoding=args.streaming_encoding,
+        vcodec=args.vcodec,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="机械臂数据平台 dataset recorder")
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--repo-id", required=True)
+    parser.add_argument("--fps", type=int, required=True)
+    parser.add_argument("--task", required=True)
+    parser.add_argument("--robot-type", default="so101_follower")
+    parser.add_argument("--streaming-encoding", choices=("auto", "on", "off"), default="auto")
+    parser.add_argument("--vcodec", default="")
+    args = parser.parse_args()
+
+    dataset = None
+    frame_count = 0
+    completed = False
+    joint_names = None
+    # Importing LeRobot pulls in its video stack and can take several seconds on
+    # the target. Do it while the web UI is explicitly in the preparing state,
+    # rather than dropping the first samples after it says recording has begun.
+    initialization_started = time.monotonic()
+    load_dependencies(args)
+    emit({
+        "type": "recorder_ready",
+        "initialization_ms": round((time.monotonic() - initialization_started) * 1000),
+    })
+
+    try:
+        for line in sys.stdin:
+            message = json.loads(line)
+            message_type = message.get("type")
+
+            if message_type == "record_frame":
+                load_dependencies(args)
+                camera = decode_image(message["camera"])
+                camera2 = decode_image(message["camera2"])
+                camera, camera2 = match_camera_to_existing_dataset(args.root, camera, camera2)
+                leader = message["leader"]
+                follower = message["follower"]
+                if joint_names is None:
+                    leader_names = list(leader)
+                    follower_names = list(follower)
+                    if not leader_names or set(leader_names) != set(follower_names):
+                        raise ValueError("Leader action 与 Follower state 的关节名称不一致")
+                    # 首帧的稳定关节顺序定义整个数据集 schema。
+                    joint_names = leader_names
+                if dataset is None:
+                    dataset = open_dataset(args, camera, camera2, joint_names)
+                    emit({"type": "dataset_opened", "episode": dataset.num_episodes, "path": str(dataset.root)})
+
+                dataset.add_frame({
+                    "observation.state": vector(follower, joint_names),
+                    "action": vector(leader, joint_names),
+                    "observation.images.camera1": camera,
+                    "observation.images.camera2": camera2,
+                    "task": args.task,
+                })
+                frame_count += 1
+                emit({"type": "frame_added", "frames": frame_count})
+
+            elif message_type == "save_episode":
+                if dataset is None or frame_count == 0:
+                    emit({"type": "recorder_error", "error": "当前 episode 没有可保存的数据帧"})
+                    raise SystemExit(2)
+                episode_index = dataset.num_episodes
+                saving_started = time.monotonic()
+                dataset.save_episode(parallel_encoding=True)
+                finalize_dataset(dataset)
+                completed = True
+                emit({
+                    "type": "episode_saved",
+                    "episode": episode_index,
+                    "frames": frame_count,
+                    "path": str(dataset.root),
+                    "saving_ms": round((time.monotonic() - saving_started) * 1000),
+                })
+                return
+
+            elif message_type == "cancel":
+                if dataset is not None:
+                    cancel_dataset(dataset)
+                    dataset = None
+                emit({"type": "recording_cancelled"})
+                return
+    except Exception as error:
+        emit({"type": "recorder_error", "error": str(error)})
+        raise
+    finally:
+        if dataset is not None and not completed:
+            try:
+                cancel_dataset(dataset)
+            except Exception as cleanup_error:
+                print(f"清理未保存 episode 失败: {cleanup_error}", file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, terminate)
+    main()

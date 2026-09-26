@@ -1,0 +1,290 @@
+import { ref } from "vue";
+import type { JointData } from "./useWebSocket";
+
+type Calibration = Record<string, { id: number; drive_mode: number; homing_offset: number; range_min: number; range_max: number }>;
+type SerialPortLike = { open(options: { baudRate: number; bufferSize?: number }): Promise<void>; close(): Promise<void>; readable: ReadableStream<Uint8Array> | null; writable: WritableStream<Uint8Array> | null };
+type SerialNavigator = Navigator & { serial?: { requestPort(): Promise<SerialPortLike> } };
+
+const names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"] as const;
+type So101JointName = (typeof names)[number];
+const IDLE_HEARTBEAT_MS = 200;
+// Match the safe calibrated Follower envelope used by the ROS bridge. The
+// Leader is normalized for control, then shown in this common coordinate
+// system so the two state panels are directly comparable.
+const followerHalfRangesDeg = [112.1758, 103.8242, 96.6154, 100.9231, 164.5714, 0];
+
+function jointsChanged(previous: JointData | null, next: JointData): boolean {
+  if (!previous) return true;
+  return names.some((name) => Math.abs(next[name] - previous[name]) >= 0.5);
+}
+
+function followerCoordinate(normalized: JointData): JointData {
+  const values = { ...normalized };
+  for (let index = 0; index < 5; index += 1) {
+    const name = names[index];
+    values[name] = normalized[name] * followerHalfRangesDeg[index] / 100;
+  }
+  return values;
+}
+
+function packet(id: number, instruction: number, params: number[]) {
+  const bytes = [0xff, 0xff, id, params.length + 2, instruction, ...params];
+  return new Uint8Array([...bytes, (~bytes.slice(2).reduce((sum, byte) => sum + byte, 0)) & 0xff]);
+}
+
+function decodeSignedMagnitude(value: number, signBit: number): number {
+  const sign = 1 << signBit;
+  return value & sign ? -(value & (sign - 1)) : value;
+}
+
+export function useLeaderSerial(
+  send: (message: object) => void,
+  log: (message: string) => void,
+  onFatalDisconnect: () => Promise<void>,
+) {
+  const connected = ref(false);
+  const error = ref<string | null>(null);
+  const joints = ref<JointData | null>(null);
+  let port: SerialPortLike | null = null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
+  let buffer: number[] = [];
+  let active = false;
+  let readFailure: Error | null = null;
+  let consecutivePollFailures = 0;
+  let lastSentJoints: JointData | null = null;
+  let lastSentAt = 0;
+
+  const delay = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+  async function readLoop() {
+    try {
+      while (reader) {
+        const read = await reader.read();
+        if (read.done) throw new Error("串口已关闭");
+        buffer.push(...read.value);
+      }
+    } catch (cause) {
+      if (active) readFailure = cause instanceof Error ? cause : new Error(String(cause));
+    }
+  }
+
+  /**
+   * 读取下一个校验和有效的完整状态包（不限定来源电机 ID）。
+   * SYNC_READ 广播后，各电机按 ID 顺序背靠背回应，需要逐包收齐而不是逐个单独请求再等待。
+   */
+  async function nextStatusPacket(minimumParams: number, timeoutMs: number): Promise<number[]> {
+    const deadline = performance.now() + timeoutMs;
+    while (performance.now() < deadline) {
+      while (buffer.length >= 4) {
+        const start = buffer.findIndex((byte, index) => byte === 0xff && buffer[index + 1] === 0xff);
+        if (start < 0) { buffer = buffer.slice(-1); break; }
+        if (start > 0) buffer = buffer.slice(start);
+        const total = buffer[3] + 4;
+        if (buffer.length < total) break;
+        const value = buffer.splice(0, total);
+        const checksum = (~value.slice(2, -1).reduce((sum, byte) => sum + byte, 0)) & 0xff;
+        if (value[value.length - 1] !== checksum) continue;
+        if (value[3] < minimumParams + 2) continue;
+        return value;
+      }
+      if (readFailure) throw readFailure;
+      if (!reader) throw new Error("串口已关闭");
+      await delay(1);
+    }
+    throw new Error("读取超时");
+  }
+
+  /**
+   * 一次 SYNC_READ (0x82) 广播读取全部电机的 Present_Position，
+   * 取代逐电机单独 READ；把每轮 6 次串行 USB 往返合并为 1 次广播 + 背靠背应答。
+   */
+  async function syncReadPositions(ids: number[]): Promise<Map<number, number>> {
+    if (!writer) throw new Error("串口尚未连接");
+    let lastError = "读取超时";
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      // 上一轮超时后可能还会有迟到的响应；不要把它们误当成本轮数据。
+      buffer = [];
+      await writer.write(packet(0xfe, 0x82, [56, 2, ...ids]));
+      // 半双工 USB 转换器需要一点时间从发送切回接收。
+      await delay(3);
+      const results = new Map<number, number>();
+      try {
+        const deadline = performance.now() + 150;
+        while (results.size < ids.length) {
+          const remaining = deadline - performance.now();
+          if (remaining <= 0) break;
+          const response = await nextStatusPacket(2, remaining);
+          const id = response[2];
+          if (!ids.includes(id) || results.has(id) || response[4] !== 0) continue;
+          results.set(id, response[5] | (response[6] << 8));
+        }
+        if (results.size === ids.length) return results;
+        lastError = `仅收到 ${results.size}/${ids.length} 个电机响应`;
+      } catch (cause) {
+        lastError = cause instanceof Error ? cause.message : String(cause);
+      }
+      if (readFailure || !active) break;
+      await delay(10 + attempt * 10);
+    }
+    throw new Error(`SYNC_READ ${lastError}（已重试 5 次）`);
+  }
+
+  async function readWord(id: number, address: number): Promise<number> {
+    if (!writer) throw new Error("串口尚未连接");
+    buffer = [];
+    await writer.write(packet(id, 0x02, [address, 2]));
+    const deadline = performance.now() + 150;
+    while (performance.now() < deadline) {
+      const response = await nextStatusPacket(2, deadline - performance.now());
+      if (response[2] !== id || response[4] !== 0) continue;
+      return response[5] | (response[6] << 8);
+    }
+    throw new Error(`读取 Leader 电机 ${id} 标定超时`);
+  }
+
+  async function verifyLeaderCalibration(calibration: Calibration) {
+    for (const name of names) {
+      const cal = calibration[name];
+      // The bus is half-duplex: issue one request at a time so responses
+      // cannot be attributed to the wrong register.
+      const min = await readWord(cal.id, 9);
+      const max = await readWord(cal.id, 11);
+      const encodedOffset = await readWord(cal.id, 31);
+      const offset = decodeSignedMagnitude(encodedOffset, 11);
+      if (min !== cal.range_min || max !== cal.range_max || offset !== cal.homing_offset) {
+        throw new Error(
+          `Leader ${name} 标定不匹配（固件: offset=${offset}, range=${min}..${max}；标定文件: offset=${cal.homing_offset}, range=${cal.range_min}..${cal.range_max}）。请重新标定 Leader。`,
+        );
+      }
+    }
+  }
+
+  async function disableLeaderTorque() {
+    if (!writer) throw new Error("串口尚未连接");
+    // 与 LeRobot 的 leader_bus.disable_torque() 对齐：关闭扭矩并解除锁定，
+    // 使主臂可被手动拖动。只写 Leader，绝不向 Follower 发送此指令。
+    for (let id = 1; id <= 6; id += 1) {
+      await writer.write(packet(id, 0x03, [40, 0])); // Torque_Enable = 0
+      await writer.write(packet(id, 0x03, [55, 0])); // Lock = 0
+    }
+  }
+
+  function normalize(raw: number, name: So101JointName, cal: Calibration["shoulder_pan"]): number {
+    const bounded = Math.max(cal.range_min, Math.min(cal.range_max, raw));
+    if (name === "gripper") {
+      const percent = ((bounded - cal.range_min) / (cal.range_max - cal.range_min)) * 100;
+      return cal.drive_mode ? 100 - percent : percent;
+    }
+    const normalized = ((bounded - cal.range_min) / (cal.range_max - cal.range_min)) * 200 - 100;
+    return cal.drive_mode ? -normalized : normalized;
+  }
+
+  async function connect(leaderId: string, fps: number) {
+    const serial = (navigator as SerialNavigator).serial;
+    if (!serial) throw new Error("当前浏览器不支持 Web Serial；请使用 Chrome 或 Edge，并通过 HTTPS 访问。");
+    if (!leaderId) throw new Error("请填写 Leader ID");
+    error.value = null;
+    const calibrationResponse = await fetch(`/api/calibration/leader/${encodeURIComponent(leaderId)}`);
+    const calibrationJson = await calibrationResponse.json();
+    if (!calibrationResponse.ok || !calibrationJson.ok) throw new Error(calibrationJson.error || "无法加载 Leader 标定");
+    const calibration = calibrationJson.calibration as Calibration;
+    if (!names.every((name) => calibration[name])) throw new Error("Leader 标定缺少关节数据");
+
+    try {
+      port = await serial.requestPort();
+      await port.open({ baudRate: 1_000_000, bufferSize: 1024 });
+      reader = port.readable?.getReader() || null;
+      writer = port.writable?.getWriter() || null;
+      if (!reader || !writer) throw new Error("无法打开串口读写通道");
+      active = true;
+      readFailure = null;
+      consecutivePollFailures = 0;
+      lastSentJoints = null;
+      lastSentAt = 0;
+      void readLoop();
+      await disableLeaderTorque();
+      // 给半双工适配器留出发送 ACK 和切回接收方向的时间。
+      await delay(150);
+      buffer = [];
+      await verifyLeaderCalibration(calibration);
+      connected.value = true;
+      log("Leader COM 已连接，标定已核对，已关闭 Leader 扭矩，开始只读采样");
+    } catch (cause) {
+      await disconnect();
+      throw cause;
+    }
+
+    const motorIds = names.map((name) => calibration[name].id);
+    const interval = Math.max(16, Math.round(1000 / Math.min(60, Math.max(1, fps))));
+    const poll = async () => {
+      if (!active) return;
+      const pollStartedAt = performance.now();
+      try {
+        const raw = await syncReadPositions(motorIds);
+        const normalizedValues = {} as JointData;
+        for (const name of names) normalizedValues[name] = normalize(raw.get(calibration[name].id)!, name, calibration[name]);
+        const values = followerCoordinate(normalizedValues);
+        joints.value = values;
+        const now = Date.now();
+        // Preserve low-latency motion while avoiding redundant serial/WebSocket
+        // traffic when the operator is holding the Leader still.
+        if (jointsChanged(lastSentJoints, normalizedValues) || now - lastSentAt >= IDLE_HEARTBEAT_MS) {
+          // `joints` is the comparable Follower-coordinate display value;
+          // normalized_joints is the actual LeRobot control command.
+          send({ type: "action", joints: values, normalized_joints: normalizedValues, ts_ms: now });
+          lastSentJoints = normalizedValues;
+          lastSentAt = now;
+        }
+        if (consecutivePollFailures > 0) {
+          log(`Leader 串口已恢复（连续丢包 ${consecutivePollFailures} 轮）`);
+          error.value = null;
+          consecutivePollFailures = 0;
+        }
+      } catch (cause) {
+        // 用户主动停止会取消正在等待的串口读取，不应记录为设备故障。
+        if (!active) return;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (!readFailure && message.includes("SYNC_READ")) {
+          consecutivePollFailures += 1;
+          error.value = `${message}；正在自动恢复 (${consecutivePollFailures}/5)`;
+          if (consecutivePollFailures === 1) log(`Leader 串口瞬时丢包: ${error.value}`);
+          // 丢弃不完整的一轮动作；机器人端超时后保持当前位置，下一轮重新读取全部关节。
+          buffer = [];
+          if (consecutivePollFailures < 8) {
+            const recoveryDelay = Math.min(250, 50 * 2 ** Math.min(consecutivePollFailures - 1, 2));
+            window.setTimeout(poll, recoveryDelay);
+            return;
+          }
+        } else {
+          error.value = message;
+        }
+        log(`Leader 串口错误: ${error.value}`);
+        await disconnect();
+        await onFatalDisconnect();
+        return;
+      }
+      // Keep the requested start-to-start cadence. Waiting a full interval after
+      // the serial round trip made a nominal 60 FPS loop run much slower.
+      const remaining = Math.max(0, interval - (performance.now() - pollStartedAt));
+      window.setTimeout(poll, remaining);
+    };
+    void poll();
+  }
+
+  async function disconnect() {
+    active = false;
+    connected.value = false;
+    try { await reader?.cancel(); } catch { /* port may already be gone */ }
+    try { reader?.releaseLock(); writer?.releaseLock(); } catch { /* ignore */ }
+    reader = null; writer = null; buffer = [];
+    readFailure = null;
+    consecutivePollFailures = 0;
+    lastSentJoints = null;
+    lastSentAt = 0;
+    try { await port?.close(); } catch { /* ignore */ }
+    port = null;
+  }
+
+  return { connected, error, joints, connect, disconnect };
+}
