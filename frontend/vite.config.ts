@@ -33,6 +33,9 @@ export default defineConfig({
     proxy: {
       "/api": `http://localhost:${backendPort}`,
       "/video": `http://localhost:${backendPort}`,
+      // LeRobot Studio 静态资源与数据集文件流同样由后端托管。
+      "/studio": `http://localhost:${backendPort}`,
+      "/studio-files": `http://localhost:${backendPort}`,
       "/ws": {
         target: `ws://localhost:${backendPort}`,
         ws: true,

@@ -39,6 +39,8 @@ const WEB_MANUAL_SLEW_SCALE = 4.0;
 const FOLLOWER_CALIBRATION_FILE = process.env.ROS_CALIB_FILE || path.join(ROBOT_DRIVER_CALIBRATION_ROOT, "follower", "R12253102.json");
 const FOLLOWER_SERIAL_PORT = process.env.ROS_FOLLOWER_PORT || "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A7A059427-if00";
 const FRONTEND_DIST = path.join(__dirname, "../../frontend/dist");
+// 数据模块内嵌的 LeRobot Studio（源码位于仓库 studio/，由启动脚本构建）
+const STUDIO_DIST = path.join(__dirname, "../../studio/dist");
 const DEFAULT_DATASET_ROOT = path.join(process.env.HOME || "/tmp", "robot_datasets");
 const LEGACY_DATASET_ROOT = path.join(process.env.HOME || "/tmp", "lerobot_datasets");
 // Keep existing installations on their current data directory unless the
@@ -313,6 +315,11 @@ app.use("/api", async (req, res, next) => {
   next();
 });
 app.use("/video", async (req, res, next) => {
+  if (!(await authSession(req))) return rejectUnauthorized(res);
+  next();
+});
+// Studio 数据集文件流（studio iframe 同源携带 cookie 自动鉴权）
+app.use("/studio-files", async (req, res, next) => {
   if (!(await authSession(req))) return rejectUnauthorized(res);
   next();
 });
@@ -2201,6 +2208,81 @@ function sendVideoFile(file: string, req: express.Request, res: express.Response
   res.setHeader("Content-Length", boundedEnd - start + 1);
   fs.createReadStream(file, { start, end: boundedEnd }).pipe(res);
 }
+
+// ===================== LeRobot Studio（数据模块内嵌查看器） =====================
+
+const STUDIO_CONTENT_TYPES: Record<string, string> = {
+  ".json": "application/json",
+  ".parquet": "application/octet-stream",
+  ".mp4": "video/mp4",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+};
+
+// 返回数据集的文件清单，供 LeRobot Studio 按需流式加载（视频走 HTTP Range，无需整包下载）。
+app.get("/api/datasets/:dataset/studio-manifest", (req, res) => {
+  const dataset = cleanDatasetName(req.params.dataset);
+  if (!dataset) { res.status(400).json({ ok: false, error: "无效的数据集名称" }); return; }
+  const root = datasetPath(dataset);
+  if (!fs.existsSync(root)) { res.status(404).json({ ok: false, error: "找不到数据集" }); return; }
+  try {
+    const files: Array<{ logicalPath: string; url: string; sizeBytes?: number; contentType?: string }> = [];
+    const walk = (dir: string, prefix: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        // 跳过 .lerobot-web / .clips 等平台内部目录
+        if (entry.name.startsWith(".")) continue;
+        const abs = path.join(dir, entry.name);
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          walk(abs, rel);
+        } else if (entry.isFile()) {
+          const size = fs.statSync(abs).size;
+          const ext = path.extname(entry.name).toLowerCase();
+          files.push({
+            logicalPath: rel,
+            url: `/studio-files/${encodeURIComponent(dataset)}/${rel.split("/").map(encodeURIComponent).join("/")}`,
+            sizeBytes: size,
+            ...(STUDIO_CONTENT_TYPES[ext] ? { contentType: STUDIO_CONTENT_TYPES[ext] } : {}),
+          });
+        }
+      }
+    };
+    walk(fs.realpathSync(root), "");
+    res.json({ ok: true, name: dataset, files });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : "读取数据集失败" });
+  }
+});
+
+// Studio 按清单逐文件拉取数据集内容。sendFile 自带 HTTP Range 支持，
+// 浏览器可直接流式播放视频，与 /api/datasets/:dataset/video 语义一致。
+app.get("/studio-files/:dataset/*splat", (req, res) => {
+  const dataset = cleanDatasetName(req.params.dataset);
+  const rawSplat = (req.params as { splat?: string | string[] }).splat;
+  const splat = Array.isArray(rawSplat) ? rawSplat.join("/") : (rawSplat ?? "");
+  if (!dataset || !splat) { res.status(400).json({ ok: false, error: "文件路径无效" }); return; }
+  // 清单不包含点前缀路径，这里同样拒绝，避免直接访问平台内部数据
+  if (splat.split("/").some((segment) => segment.startsWith("."))) {
+    res.status(404).json({ ok: false, error: "找不到文件" });
+    return;
+  }
+  try {
+    const root = fs.realpathSync(datasetPath(dataset));
+    const requested = fs.realpathSync(path.resolve(root, splat));
+    if (!requested.startsWith(root + path.sep)) throw new Error("文件路径越界");
+    res.setHeader("Cache-Control", "private, max-age=3600");
+    res.sendFile(requested, (error) => {
+      if (!error || res.headersSent) return;
+      res.status(404).json({ ok: false, error: "找不到文件" });
+    });
+  } catch {
+    res.status(404).json({ ok: false, error: "找不到文件" });
+  }
+});
 
 app.post("/api/datasets/:dataset/episodes/:episode/clip", async (req, res) => {
   const dataset = cleanDatasetName(req.params.dataset);
@@ -4179,6 +4261,24 @@ app.use(express.static(FRONTEND_DIST, {
     }
   },
 }));
+
+// LeRobot Studio（数据模块内嵌查看器），需在 SPA fallback 之前挂载。
+app.use("/studio", express.static(STUDIO_DIST, {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith("index.html")) {
+      res.setHeader("Cache-Control", "no-store, must-revalidate");
+    }
+  },
+}));
+app.get("/studio/*splat", (_req, res) => {
+  const indexFile = path.join(STUDIO_DIST, "index.html");
+  if (fs.existsSync(indexFile)) {
+    res.setHeader("Cache-Control", "no-store, must-revalidate");
+    res.sendFile(indexFile);
+  } else {
+    res.status(404).json({ ok: false, error: "Studio 未构建，请先运行启动脚本完成 studio 构建" });
+  }
+});
 
 // SPA fallback (前端未构建时返回提示，不报 404)
 app.use((req, res) => {

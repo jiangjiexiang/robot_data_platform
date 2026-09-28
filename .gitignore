@@ -1,0 +1,3 @@
+# 依赖缓存（studio/node_modules 体积过大，启动脚本可自动安装）
+**/node_modules/.vite/
+studio/node_modules/

@@ -39,6 +39,26 @@
         <div v-else class="reference-empty"><span>□</span><strong>未找到匹配的数据集</strong><small>请调整搜索词或筛选条件</small></div>
       </section>
 
+      <section v-else-if="selectedDataset && dataSection === 'viewer'" class="studio-full" aria-label="LeRobot 数据查看">
+        <div class="dataset-context studio-bar">
+          <button @click="closeDataset">← 返回列表</button>
+          <div><strong>{{ selectedDataset.name }}</strong><small>{{ selectedDataset.robotType || "机器人数据" }} · {{ selectedDataset.totalEpisodes }} 段采集 · {{ selectedDataset.cameras.length }} 路相机</small></div>
+          <div class="context-actions">
+            <template v-if="selectedEpisode">
+              <span>{{ selectedEpisode.frames }} 帧</span>
+              <select v-model.number="playbackSpeed" aria-label="回放速度"><option :value="0.25">0.25x</option><option :value="0.5">0.5x</option><option :value="1">1x</option><option :value="1.5">1.5x</option><option :value="2">2x</option></select>
+              <button class="playback-button" :disabled="playbackBusy" @click="togglePlayback">{{ playbackBusy ? `回放中 ${playbackFrame}/${playbackFrames}` : "▶ 回放到机械臂" }}</button>
+              <button class="episode-delete-button" :disabled="deletingEpisode || playbackBusy" @click="deleteEpisode">{{ deletingEpisode ? "删除中…" : "删除片段" }}</button>
+            </template>
+            <span :class="{ loading: detailLoading }">{{ detailLoading ? "正在读取…" : "读取完成" }}</span>
+          </div>
+        </div>
+        <div v-if="detailLoading" class="detail-skeleton"><i class="wide"></i><i></i><i></i><i class="video"></i><i class="video"></i></div>
+        <div v-else class="studio-embed">
+          <iframe :key="studioEmbedUrl" :src="studioEmbedUrl" title="LeRobot 数据查看" allow="fullscreen"></iframe>
+        </div>
+      </section>
+
       <template v-else-if="selectedDataset">
       <div class="dataset-context">
         <button @click="closeDataset">← 返回列表</button>
@@ -91,37 +111,7 @@
           <i class="wide"></i><i></i><i></i><i class="video"></i><i class="video"></i>
         </div>
         <template v-else>
-        <template v-if="dataSection === 'viewer' && selectedEpisode">
-        <div class="review-head">
-          <div><p class="eyebrow">片段 {{ String(selectedEpisode.episode).padStart(3, "0") }}</p><h3>{{ selectedEpisode.tasks.join(" / ") || "未命名任务" }}</h3></div>
-          <div class="episode-facts"><span>{{ selectedEpisode.frames }} 帧</span><span>{{ selectedDataset?.fps }} 帧/秒</span><span>{{ formatDuration(selectedEpisode.duration) }}</span><select v-model.number="playbackSpeed" aria-label="回放速度"><option :value="0.25">0.25x</option><option :value="0.5">0.5x</option><option :value="1">1x</option><option :value="1.5">1.5x</option><option :value="2">2x</option></select><button class="playback-button" :disabled="playbackBusy" @click="togglePlayback">{{ playbackBusy ? `回放中 ${playbackFrame}/${playbackFrames}` : "▶ 回放到机械臂" }}</button><button class="episode-delete-button" :disabled="deletingEpisode || playbackBusy" @click="deleteEpisode">{{ deletingEpisode ? "删除中…" : "删除片段" }}</button></div>
-        </div>
-
-        <div class="quality-panel" :class="{ warning: selectedEpisode.quality.flags.length }">
-          <div><small>画面检查</small><strong>{{ selectedEpisode.quality.score }} / 100</strong></div>
-          <span>{{ selectedEpisode.quality.cameraCoverage }} / {{ selectedEpisode.quality.expectedCameras }} 路视频</span>
-          <ul v-if="selectedEpisode.quality.flags.length"><li v-for="flag in selectedEpisode.quality.flags" :key="flag.code">{{ flag.label }}</li></ul>
-          <p v-else>帧数与视频通道检查通过</p>
-        </div>
-
-        <div class="playback-toolbar" v-if="videoEntries.length">
-          <el-button class="playback-icon" text circle :title="playing ? '暂停' : '播放'" :aria-label="playing ? '暂停' : '播放'" @click="toggleVideoPlayback"><el-icon><VideoPause v-if="playing" /><VideoPlay v-else /></el-icon></el-button>
-          <el-button class="playback-icon" text circle title="上一帧" aria-label="上一帧" @click="stepVideo(-1)"><el-icon><ArrowLeft /></el-icon></el-button>
-          <el-button class="playback-icon" text circle title="下一帧" aria-label="下一帧" @click="stepVideo(1)"><el-icon><ArrowRight /></el-icon></el-button>
-          <span class="playback-time">{{ formatPlaybackTime(currentTime) }} / {{ formatPlaybackTime(videoDuration) }}</span>
-          <input class="playback-scrubber" type="range" min="0" :max="Math.max(videoDuration, 0.01)" step="0.001" :value="currentTime" aria-label="回放进度" @input="seekVideo(Number(($event.target as HTMLInputElement).value))" />
-        </div>
-        <div class="videos" :class="{ single: videoEntries.length < 2 }">
-          <div v-for="([camera, url], index) in videoEntries" :key="camera" class="video-channel">
-            <video :ref="(element) => setVideoRef(element, index)" :src="url" muted playsinline preload="auto" @play="syncPlay(index)" @pause="syncPause(index)" @seeking="syncSeek(index)" @timeupdate="syncTime(index)" @loadedmetadata="readVideoDuration" @ended="onVideoEnded" @error="videoErrors.add(camera)"></video>
-            <span>{{ cameraLabel(camera, index) }}</span>
-            <small v-if="videoErrors.has(camera)">视频加载失败，请检查机器人服务</small>
-          </div>
-          <div v-if="videoEntries.length === 0" class="video-missing">该采集片段没有可回放的视频</div>
-        </div>
-        </template>
-
-        <template v-else-if="dataSection === 'review' && selectedEpisode">
+        <template v-if="dataSection === 'review' && selectedEpisode">
           <div class="review-export">
             <span>已通过 <strong>{{ approvedCount }}</strong> / {{ episodes.length }} 个片段</span>
             <input v-model="exportTarget" :placeholder="`${selectedDataset.name}_approved`" aria-label="导出目标数据集名称" />
@@ -235,7 +225,6 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
-import { ArrowLeft, ArrowRight, VideoPause, VideoPlay } from "@element-plus/icons-vue";
 
 type ReviewStatus = "unreviewed" | "approved" | "rejected";
 interface Review { status: ReviewStatus; tags: string[]; notes: string; assignee?: string; reviewer?: string; qualityFlags?: string[]; createdAt?: string; updatedAt?: string }
@@ -347,6 +336,13 @@ const filteredEpisodes = computed(() => {
 const allFilteredSelected = computed(() => filteredEpisodes.value.length > 0 && filteredEpisodes.value.every((item) => selectedIds.has(item.episode)));
 const videoEntries = computed(() => Object.entries(selectedEpisode.value?.videos || {}));
 
+// 数据查看 tab：内嵌 LeRobot Studio，按数据集清单流式浏览视频/图表/原始数据
+const studioEmbedUrl = computed(() => {
+  const name = selectedDataset.value?.name;
+  if (!name) return "";
+  return `/studio/?manifest=${encodeURIComponent(`/api/datasets/${encodeURIComponent(name)}/studio-manifest`)}`;
+});
+
 function statusText(status: ReviewStatus) { return ({ unreviewed: "待审核", approved: "通过", rejected: "拒绝" })[status]; }
 function formatDuration(seconds: number) { const total = Math.max(0, Math.round(seconds)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`; }
 function formatDate(value?: string) { if (!value) return "-"; return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
@@ -404,7 +400,7 @@ async function loadDatasets(refresh = false) {
 
 async function selectDataset(item: DatasetSummary) {
   const requestId = ++detailRequest;
-  selectedDataset.value = item; selectedEpisode.value = null; selectedIds.clear(); dataSection.value = "review"; error.value = null; detailLoading.value = true;
+  selectedDataset.value = item; selectedEpisode.value = null; selectedIds.clear(); dataSection.value = "viewer"; error.value = null; detailLoading.value = true;
   writeDatasetHash(item.name);
   try {
     const data = await requestJson(`/api/datasets/${encodeURIComponent(item.name)}?refresh=1`);
@@ -647,7 +643,7 @@ async function openDatasetFromHash() {
   if (!name) return;
   const dataset = datasets.value.find((item) => item.name === name);
   if (dataset && selectedDataset.value?.name !== dataset.name) await selectDataset(dataset);
-  if (dataset && selectedDataset.value?.name === dataset.name) dataSection.value = "review";
+  if (dataset && selectedDataset.value?.name === dataset.name) dataSection.value = "viewer";
 }
 
 function onHashChange() {
@@ -682,6 +678,9 @@ onUnmounted(() => { window.removeEventListener("hashchange", onHashChange); if (
 .review-placeholder strong { display: block; margin-bottom: 10px; color: #34373a; font-size: 14px; }
 .review-placeholder p { margin: 0 0 6px; line-height: 1.7; }
 .workspace { container-type: inline-size; max-width: 1900px; margin: 0 auto; padding: 18px 24px 28px; }
+.workspace:has(.studio-full) { max-width: none; padding: 14px 16px 16px; }
+.workspace:has(.studio-full) .data-platform { grid-template-columns: minmax(0, 1fr); }
+.workspace:has(.studio-full) .data-sidebar { display: none; }
 .workspace-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }.workspace-head h2 { margin-top: 2px; font-size: 20px; }.eyebrow { color: #78a9c6; font-size: 9px; font-weight: 700; letter-spacing: 1px; }
 .icon-button { width: 32px; height: 32px; border: 1px solid #315574; border-radius: 5px; background: #102941; color: #8dd4f4; cursor: pointer; font-size: 18px; }
 .kpis { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid rgba(151,188,222,.15); border-bottom: 0; background: #0b1724; }.kpis div { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 3px 10px; min-width: 0; padding: 11px 14px; border-right: 1px solid rgba(151,188,222,.12); }.kpis div:last-child { border-right: 0; }.kpis small { color: #7890a3; font-size: 9px; }.kpis strong { grid-row: 1 / span 2; grid-column: 2; color: #e7f1f7; font: 22px ui-monospace, monospace; }.kpis strong.alert { color: #ff9aa7; }.kpis span { color: #587185; font-size: 9px; }
@@ -702,6 +701,8 @@ onUnmounted(() => { window.removeEventListener("hashchange", onHashChange); if (
 .detail-tabs { display: flex; gap: 3px; margin: -4px 0 12px; border-bottom: 1px solid rgba(151,188,222,.13); }.detail-tabs button { position: relative; padding: 8px 10px; border: 0; cursor: pointer; background: transparent; color: #71899c; font-size: 9px; }.detail-tabs button.active { color: #dff5ff; }.detail-tabs button.active::after { content: ""; position: absolute; right: 8px; bottom: -1px; left: 8px; height: 2px; background: #64c9e8; }.detail-tabs span { margin-left: 3px; color: #5e849b; }
 .quality-panel { display: grid; grid-template-columns: auto auto 1fr; align-items: center; gap: 5px 14px; margin-bottom: 10px; padding: 8px 10px; border-left: 3px solid #4fbd8b; background: #10251f; }.quality-panel.warning { border-color: #e66d7c; background: #27181e; }.quality-panel div { display: flex; align-items: baseline; gap: 7px; }.quality-panel small,.quality-panel span,.quality-panel p,.quality-panel li { color: #8199a9; font-size: 9px; }.quality-panel strong { font: 13px ui-monospace,monospace; }.quality-panel ul { display: flex; gap: 12px; margin: 0; padding: 0; list-style: none; }.quality-panel p { margin: 0; }
 .videos { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }.videos.single { grid-template-columns: minmax(280px,720px); }.video-channel { min-width: 0; background: #05090e; }.video-channel video { display: block; width: 100%; aspect-ratio: 16/9; background: #000; }.video-channel span,.video-channel small { display: block; padding: 5px 7px; color: #7892a6; font-size: 9px; }.video-channel small { color: #ff91a0; }.video-missing { grid-column: 1/-1; display: grid; place-items: center; min-height: 220px; color: #61798c; background: #080f18; font-size: 11px; }
+.studio-full { display: flex; flex-direction: column; gap: 8px; }.studio-full .dataset-context { padding: 7px 12px; }
+.studio-embed { position: relative; flex: 1; height: calc(100vh - 152px); min-height: 560px; overflow: hidden; border: 1px solid rgba(151,188,222,.13); border-radius: 6px; background: #fff; }.studio-embed iframe { position: absolute; inset: 0; display: block; width: 100%; height: 100%; border: 0; }
 .review-editor { display: grid; gap: 8px; margin-top: 11px; padding-top: 11px; border-top: 1px solid rgba(151,188,222,.13); }.editor-heading { display: flex; align-items: center; justify-content: space-between; }.editor-heading strong { font-size: 11px; }.editor-heading label { display: flex; align-items: center; gap: 5px; color: #8197aa; font-size: 9px; }.status-control { display: grid; grid-template-columns: repeat(3,1fr); gap: 4px; }.status-control button { padding: 7px; border: 1px solid #29435f; border-radius: 4px; cursor: pointer; background: transparent; color: #8095a6; font-size: 9px; }.status-control button.active { background: #294050; color: white; }.status-control button.approved.active { background: #24684f; }.status-control button.rejected.active { background: #793746; }.review-editor > label,.people-fields label { display: grid; gap: 4px; color: #8ca2b3; font-size: 9px; }.people-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }.review-editor input,.review-editor textarea { width: 100%; padding: 7px; resize: vertical; border: 1px solid #29435f; border-radius: 4px; outline: 0; background: #091522; color: #e7edf8; font: 10px/1.5 inherit; }.review-meta { color: #647d90; font-size: 8px; }.save-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-height: 31px; color: #69d7a3; font-size: 9px; }.save-row button { padding: 7px 13px; border: 0; border-radius: 4px; cursor: pointer; background: #64c9e8; color: #07131c; font-weight: 650; }.empty { display: grid; place-items: center; min-height: 240px; color: #667f92; }
 .collections-pane > header,.audit-pane > header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; }.collections-pane h3,.audit-pane h3 { margin-top: 3px; font-size: 15px; }.collections-pane > header > span,.audit-pane > header > span { color: #7890a3; font-size: 9px; }.publish-box { display: grid; grid-template-columns: minmax(180px,1fr) auto; align-items: end; gap: 8px; padding: 12px; border: 1px solid #28425a; background: #0a1622; }.publish-box label { display: grid; gap: 5px; color: #8ca2b3; font-size: 9px; }.publish-box input { min-width: 0; padding: 8px; border: 1px solid #29435f; border-radius: 4px; outline: 0; background: #101f2e; color: #e7edf8; font-size: 10px; }.publish-box button { height: 33px; padding: 0 12px; border: 0; border-radius: 4px; cursor: pointer; background: #64c9e8; color: #07131c; font-size: 9px; font-weight: 650; }.publish-box button:disabled { cursor: not-allowed; opacity: .45; }.publish-box p { grid-column: 1/-1; margin: 0; color: #60798c; font-size: 8px; }.collection-list,.audit-list { margin-top: 10px; border-top: 1px solid rgba(151,188,222,.12); }.collection-list article { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 7px 12px; padding: 11px 5px; border-bottom: 1px solid rgba(151,188,222,.1); }.collection-list article div { display: grid; gap: 3px; }.collection-list strong { font-size: 10px; }.collection-list small,.collection-list p { color: #6f879a; font-size: 8px; }.collection-list p { grid-column: 1/-1; margin: 0; }.collection-list a { color: #77cce9; font-size: 9px; text-decoration: none; }.published { padding: 2px 5px; border-radius: 3px; background: #173a31; color: #65daa4; font-size: 8px; }.audit-list article { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 5px 9px; padding: 10px 5px; border-bottom: 1px solid rgba(151,188,222,.1); }.audit-list strong,.audit-list time { color: #8299aa; font-size: 8px; }.audit-list time { font-family: ui-monospace,monospace; }.audit-list p { grid-column: 2/-1; margin: 0; color: #b3c5d1; font-size: 9px; }.audit-action { padding: 3px 5px; border-radius: 3px; background: #173148; color: #8acfea; font-size: 8px; }
 @container (max-width: 1150px) { .catalog-skeleton,.dataset-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.data-layout { grid-template-columns: 300px minmax(300px,1fr); }.episode-scroll { max-height: 360px; } }

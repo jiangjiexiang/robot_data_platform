@@ -243,6 +243,7 @@ PY
 }
 restore_npm_bins "$DIR/robot-server"
 restore_npm_bins "$DIR/frontend"
+restore_npm_bins "$DIR/studio"
 
 if [ ! -x "$DIR/robot-server/node_modules/.bin/tsc" ]; then
     echo "安装 robot-server 依赖..."
@@ -252,9 +253,13 @@ if [ ! -x "$DIR/frontend/node_modules/.bin/vite" ]; then
     echo "安装 frontend 依赖..."
     cd "$DIR/frontend" && npm_install
 fi
-if [ ! -x "$DIR/robot-server/node_modules/.bin/tsc" ] || [ ! -x "$DIR/frontend/node_modules/.bin/vite" ]; then
+if [ ! -x "$DIR/studio/node_modules/.bin/vite" ]; then
+    echo "安装 studio 依赖..."
+    cd "$DIR/studio" && npm_install
+fi
+if [ ! -x "$DIR/robot-server/node_modules/.bin/tsc" ] || [ ! -x "$DIR/frontend/node_modules/.bin/vite" ] || [ ! -x "$DIR/studio/node_modules/.bin/vite" ]; then
     echo "错误: 依赖安装后仍缺少构建工具（tsc / vite）"
-    echo "可尝试清理后重装: rm -rf robot-server/node_modules frontend/node_modules，然后重新运行本脚本。"
+    echo "可尝试清理后重装: rm -rf robot-server/node_modules frontend/node_modules studio/node_modules，然后重新运行本脚本。"
     exit 1
 fi
 
@@ -266,6 +271,16 @@ if [ ! -f "$FRONTEND_OUTPUT" ] \
     echo "前端源码有更新，正在构建生产资源..."
     cd "$DIR/frontend"
     npm run build
+fi
+
+# LeRobot Studio（数据查看内嵌页面），base 固定为 /studio/。
+STUDIO_OUTPUT="$DIR/studio/dist/index.html"
+if [ ! -f "$STUDIO_OUTPUT" ] \
+    || [ "$DIR/studio/vite.config.ts" -nt "$STUDIO_OUTPUT" ] \
+    || find "$DIR/studio/src" -type f -newer "$STUDIO_OUTPUT" -print -quit | grep -q .; then
+    echo "Studio 源码有更新，正在构建..."
+    cd "$DIR/studio"
+    BASE_PATH=/studio/ npm run build
 fi
 
 # 日常启动直接运行编译后的服务端；仅源文件变化时重新构建。

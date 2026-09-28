@@ -109,7 +109,6 @@
       />
       </div>
       <div v-else-if="workspace === 'datasets'" class="route-view">
-        <section class="route-title"><p>录制管理</p><h1>数据集</h1><span class="route-title-description">管理和审核 SO101 采集数据集</span></section>
         <DatasetWorkspace />
       </div>
       <UploadWorkspace v-else-if="workspace === 'upload'" />
