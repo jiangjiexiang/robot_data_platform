@@ -70,6 +70,18 @@ export type { MediaCopyResult } from './services/mediaCopy';
 
 export { ExportService } from './export/ExportService';
 export { WebExportAdapter } from './export/WebExportAdapter';
+export { RemoteExportAdapter } from './export/RemoteExportAdapter';
+export type {
+  RemoteExportAdapterOptions,
+  RemoteUploadProgress,
+} from './export/RemoteExportAdapter';
+export {
+  detectHostPlatform,
+  isValidPlatformDatasetName,
+  defaultPlatformTargetName,
+  PLATFORM_DATASET_NAME_PATTERN,
+} from './services/hostPlatform';
+export type { HostPlatformContext } from './services/hostPlatform';
 export { writeMetadata } from './export/MetadataExporter';
 export { exportDataFiles } from './export/DataProcessor';
 export {

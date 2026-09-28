@@ -723,7 +723,17 @@
     "errorUnknown": "导出失败",
     "cancelled": "导出已取消。",
     "cancelExport": "取消导出",
-    "versionReadOnly": "此数据集版本不支持导出，仅可查看。"
+    "versionReadOnly": "此数据集版本不支持导出，仅可查看。",
+    "platform": "平台数据集",
+    "platformTarget": "目标数据集名称",
+    "platformTargetHint": "清洗结果会直接上传到平台数据目录，另存为新数据集；源数据集不会被修改。",
+    "platformOverwrite": "替换同名数据集（旧的移入回收目录）",
+    "platformCommitted": "已保存到平台数据集：{{target}}",
+    "platformUploaded": "已上传 {{bytes}} · {{files}} 个文件",
+    "platformNameInvalid": "数据集名称只能包含字母、数字、点、下划线和中划线。",
+    "platformNameSameAsSource": "目标名称不能与源数据集相同。",
+    "keepEditing": "继续编辑",
+    "done": "完成"
   },
   "dialogs": {
     "remoteArchive": {

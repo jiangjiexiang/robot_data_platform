@@ -43,8 +43,8 @@ const WEB_MANUAL_SLEW_SCALE = 4.0;
 const FOLLOWER_CALIBRATION_FILE = process.env.ROS_CALIB_FILE || path_1.default.join(ROBOT_DRIVER_CALIBRATION_ROOT, "follower", "R12253102.json");
 const FOLLOWER_SERIAL_PORT = process.env.ROS_FOLLOWER_PORT || "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A7A059427-if00";
 const FRONTEND_DIST = path_1.default.join(__dirname, "../../frontend/dist");
-// 数据模块内嵌的 LeRobot Studio（源码位于仓库 studio/，由启动脚本构建）
 const STUDIO_DIST = path_1.default.join(__dirname, "../../studio/dist");
+// LeRobot Studio 独立页面（源码位于仓库 studio/，由启动脚本构建）
 const DEFAULT_DATASET_ROOT = path_1.default.join(process.env.HOME || "/tmp", "robot_datasets");
 const LEGACY_DATASET_ROOT = path_1.default.join(process.env.HOME || "/tmp", "lerobot_datasets");
 // Keep existing installations on their current data directory unless the
@@ -2193,6 +2193,298 @@ app.get("/studio-files/:dataset/*splat", (req, res) => {
     }
     catch {
         res.status(404).json({ ok: false, error: "找不到文件" });
+    }
+});
+// ---------------------------------------------------------------------------
+// Studio 导出回传：把清洗结果直接写进平台数据目录，免掉浏览器落盘再上传。
+// 前端 RemoteExportAdapter 先建会话，再按分片 PUT 写入 .lerobot-web 下的暂存
+// 目录（点前缀，天然被数据清单忽略），最后 commit 校验元数据并 rename 成正式
+// 数据集。未提交的会话按 TTL 清理，服务重启遗留的目录同样会被回收。
+// ---------------------------------------------------------------------------
+const STUDIO_EXPORT_ROOT = path_1.default.join(DATASET_ROOT, ".lerobot-web", "studio-export");
+const STUDIO_EXPORT_TTL_MS = 6 * 60 * 60 * 1000;
+const STUDIO_EXPORT_CHUNK_BYTES = 8 * 1024 * 1024;
+const STUDIO_EXPORT_MAX_CHUNK_BYTES = 16 * 1024 * 1024;
+const STUDIO_EXPORT_MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024;
+const STUDIO_EXPORT_MAX_TOTAL_BYTES = 48 * 1024 * 1024 * 1024;
+const STUDIO_EXPORT_MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
+const STUDIO_EXPORT_ALLOWED_EXTENSIONS = new Set([
+    ".json", ".jsonl", ".parquet", ".mp4", ".png", ".jpg", ".jpeg", ".webp", ".txt", ".csv",
+]);
+const studioExportSessions = new Map();
+function studioExportSessionRoot(id) {
+    return path_1.default.join(STUDIO_EXPORT_ROOT, id);
+}
+function studioExportFilesRoot(id) {
+    return path_1.default.join(studioExportSessionRoot(id), "files");
+}
+function studioExportTotalBytes(session) {
+    let total = 0;
+    for (const size of session.files.values())
+        total += size;
+    return total;
+}
+function cleanStudioExportSessionId(value) {
+    return typeof value === "string" && /^ses-[0-9a-z]+-[0-9a-f]{12}$/.test(value) ? value : null;
+}
+/** 导出产物相对路径：必须至少两级、禁止绝对路径 / .. / 点前缀段，扩展名在白名单内。 */
+function cleanStudioExportPath(value) {
+    if (typeof value !== "string")
+        return null;
+    const raw = value.trim().replace(/\\/g, "/");
+    if (!raw || raw.length > 400 || raw.startsWith("/"))
+        return null;
+    const segments = raw.split("/");
+    if (segments.length < 2 || segments.length > 6)
+        return null;
+    for (const segment of segments) {
+        if (segment === "." || segment === ".." || segment.startsWith("."))
+            return null;
+        if (!/^[\p{L}\p{N}][\p{L}\p{N}._ -]{0,127}$/u.test(segment))
+            return null;
+    }
+    if (!STUDIO_EXPORT_ALLOWED_EXTENSIONS.has(path_1.default.extname(segments[segments.length - 1]).toLowerCase()))
+        return null;
+    return segments.join("/");
+}
+function freeDiskBytes() {
+    try {
+        const stat = fs_1.default.statfsSync(DATASET_ROOT);
+        return Number(stat.bavail) * Number(stat.bsize);
+    }
+    catch {
+        return null;
+    }
+}
+function dropStudioExportSession(id) {
+    studioExportSessions.delete(id);
+    try {
+        fs_1.default.rmSync(studioExportSessionRoot(id), { recursive: true, force: true });
+    }
+    catch { /* 暂存目录可能已不存在 */ }
+}
+function sweepStudioExportSessions() {
+    const now = Date.now();
+    for (const [id, session] of [...studioExportSessions]) {
+        if (now - session.touchedAt <= STUDIO_EXPORT_TTL_MS)
+            continue;
+        dropStudioExportSession(id);
+    }
+    try {
+        for (const entry of fs_1.default.readdirSync(STUDIO_EXPORT_ROOT, { withFileTypes: true })) {
+            if (!entry.isDirectory() || studioExportSessions.has(entry.name))
+                continue;
+            const abs = path_1.default.join(STUDIO_EXPORT_ROOT, entry.name);
+            if (now - fs_1.default.statSync(abs).mtimeMs > STUDIO_EXPORT_TTL_MS)
+                dropStudioExportSession(entry.name);
+        }
+    }
+    catch { /* 尚未创建过暂存目录 */ }
+}
+setInterval(sweepStudioExportSessions, 10 * 60 * 1000).unref();
+/** 把请求体流式写入 target 的 offset 处，避免大视频整体进内存。 */
+function writeStudioExportChunk(target, offset, req, limit) {
+    return new Promise((resolve, reject) => {
+        const out = fs_1.default.createWriteStream(target, offset > 0 ? { flags: "r+", start: offset } : { flags: "w" });
+        let received = 0;
+        let settled = false;
+        const fail = (error) => {
+            if (settled)
+                return;
+            settled = true;
+            out.destroy();
+            req.destroy();
+            reject(error);
+        };
+        out.on("error", (error) => fail(error instanceof Error ? error : new Error("写入暂存文件失败")));
+        req.on("error", (error) => fail(error instanceof Error ? error : new Error("上传中断")));
+        req.on("data", (chunk) => {
+            received += chunk.length;
+            if (received > limit)
+                fail(new Error(`分片超过 ${Math.floor(limit / (1024 * 1024))}MB 限制`));
+        });
+        out.on("finish", () => {
+            if (settled)
+                return;
+            settled = true;
+            resolve(offset + received);
+        });
+        req.pipe(out);
+    });
+}
+app.post("/api/studio-export/sessions", (req, res) => {
+    const source = cleanDatasetName(req.body?.source);
+    const target = cleanDatasetName(req.body?.target);
+    const overwrite = req.body?.overwrite === true;
+    if (!source || !target) {
+        res.status(400).json({ ok: false, error: "数据集名称无效（仅支持字母、数字、点、下划线和中划线）" });
+        return;
+    }
+    if (target === source) {
+        res.status(400).json({ ok: false, error: "目标数据集不能与源数据集同名（清洗结果会另存为新数据集）" });
+        return;
+    }
+    if (!fs_1.default.existsSync(datasetPath(source))) {
+        res.status(404).json({ ok: false, error: `找不到源数据集: ${source}` });
+        return;
+    }
+    if (fs_1.default.existsSync(datasetPath(target)) && !overwrite) {
+        res.status(409).json({ ok: false, error: `目标数据集已存在: ${target}，请换一个名称` });
+        return;
+    }
+    if (recordingIsActive() || playbackIsActive()) {
+        res.status(409).json({ ok: false, error: "录制或回放正在运行，请先停止" });
+        return;
+    }
+    sweepStudioExportSessions();
+    const free = freeDiskBytes();
+    if (free !== null && free < STUDIO_EXPORT_MIN_FREE_BYTES) {
+        res.status(507).json({ ok: false, error: `磁盘剩余空间不足（${Math.floor(free / (1024 * 1024))}MB）` });
+        return;
+    }
+    const id = `ses-${Date.now().toString(36)}-${crypto_1.default.randomBytes(6).toString("hex")}`;
+    try {
+        fs_1.default.mkdirSync(studioExportFilesRoot(id), { recursive: true });
+    }
+    catch (error) {
+        res.status(500).json({ ok: false, error: error instanceof Error ? error.message : "创建暂存目录失败" });
+        return;
+    }
+    studioExportSessions.set(id, {
+        id,
+        source,
+        target,
+        actor: cleanShortText(req.body?.actor, 80) || "本地用户",
+        overwrite,
+        createdAt: Date.now(),
+        touchedAt: Date.now(),
+        files: new Map(),
+    });
+    res.status(201).json({ ok: true, sessionId: id, target, chunkSizeBytes: STUDIO_EXPORT_CHUNK_BYTES });
+});
+app.put("/api/studio-export/sessions/:id/file", async (req, res) => {
+    const id = cleanStudioExportSessionId(req.params.id);
+    const session = id ? studioExportSessions.get(id) : null;
+    if (!session) {
+        res.status(404).json({ ok: false, error: "导出会话已过期，请重新导出" });
+        return;
+    }
+    const relative = cleanStudioExportPath(req.query.path);
+    const offset = Number(req.query.offset);
+    if (!relative || !Number.isInteger(offset) || offset < 0) {
+        res.status(400).json({ ok: false, error: "导出路径或偏移无效" });
+        return;
+    }
+    const written = session.files.get(relative) ?? 0;
+    if (offset !== written) {
+        res.status(409).json({ ok: false, error: `偏移不连续: ${relative} 期望 ${written}，实际 ${offset}` });
+        return;
+    }
+    const declared = Number(req.headers["x-file-size"]);
+    if (offset === 0 && Number.isFinite(declared) && declared > STUDIO_EXPORT_MAX_FILE_BYTES) {
+        res.status(413).json({ ok: false, error: `单个文件超过 ${Math.floor(STUDIO_EXPORT_MAX_FILE_BYTES / (1024 * 1024 * 1024))}GB 限制` });
+        return;
+    }
+    if (written > STUDIO_EXPORT_MAX_FILE_BYTES) {
+        res.status(413).json({ ok: false, error: `单个文件超过 ${Math.floor(STUDIO_EXPORT_MAX_FILE_BYTES / (1024 * 1024 * 1024))}GB 限制` });
+        return;
+    }
+    const filesRoot = studioExportFilesRoot(session.id);
+    const absolute = path_1.default.resolve(filesRoot, relative);
+    if (!absolute.startsWith(filesRoot + path_1.default.sep)) {
+        res.status(400).json({ ok: false, error: "导出路径越界" });
+        return;
+    }
+    try {
+        fs_1.default.mkdirSync(path_1.default.dirname(absolute), { recursive: true });
+        const finalSize = await writeStudioExportChunk(absolute, offset, req, STUDIO_EXPORT_MAX_CHUNK_BYTES);
+        session.files.set(relative, finalSize);
+        session.touchedAt = Date.now();
+        const total = studioExportTotalBytes(session);
+        if (total > STUDIO_EXPORT_MAX_TOTAL_BYTES) {
+            dropStudioExportSession(session.id);
+            res.status(507).json({ ok: false, error: `导出总大小超过 ${Math.floor(STUDIO_EXPORT_MAX_TOTAL_BYTES / (1024 * 1024 * 1024))}GB 限制` });
+            return;
+        }
+        res.json({ ok: true, path: relative, size: finalSize });
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.status(message.includes("ENOSPC") ? 507 : 500).json({ ok: false, error: message });
+    }
+});
+app.delete("/api/studio-export/sessions/:id", (req, res) => {
+    const id = cleanStudioExportSessionId(req.params.id);
+    if (id)
+        dropStudioExportSession(id);
+    res.json({ ok: true });
+});
+app.post("/api/studio-export/sessions/:id/commit", (req, res) => {
+    const id = cleanStudioExportSessionId(req.params.id);
+    const session = id ? studioExportSessions.get(id) : null;
+    if (!session) {
+        res.status(404).json({ ok: false, error: "导出会话已过期，请重新导出" });
+        return;
+    }
+    session.touchedAt = Date.now();
+    const filesRoot = studioExportFilesRoot(session.id);
+    const targetRoot = datasetPath(session.target);
+    try {
+        if (!session.files.size)
+            throw new Error("暂存目录为空，没有可提交的文件");
+        if (recordingIsActive() || playbackIsActive())
+            throw new Error("录制或回放正在运行，请先停止");
+        if (!fs_1.default.existsSync(datasetPath(session.source)))
+            throw new Error(`找不到源数据集: ${session.source}`);
+        for (const [relative, declared] of session.files) {
+            const stat = fs_1.default.statSync(path_1.default.join(filesRoot, relative));
+            if (stat.size !== declared)
+                throw new Error(`文件上传不完整: ${relative}（${stat.size}/${declared} 字节）`);
+        }
+        const infoPath = path_1.default.join(filesRoot, "meta", "info.json");
+        if (!fs_1.default.existsSync(infoPath))
+            throw new Error("缺少 meta/info.json，无法识别数据集版本");
+        const infoJson = JSON.parse(fs_1.default.readFileSync(infoPath, "utf-8"));
+        if (typeof infoJson.codebase_version !== "string" || !infoJson.codebase_version)
+            throw new Error("meta/info.json 缺少 codebase_version");
+        let backup = null;
+        if (fs_1.default.existsSync(targetRoot)) {
+            if (!session.overwrite)
+                throw new Error(`目标数据集已存在: ${session.target}`);
+            fs_1.default.mkdirSync(DATASET_TRASH_ROOT, { recursive: true });
+            backup = path_1.default.join(DATASET_TRASH_ROOT, `${session.target}-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+            fs_1.default.renameSync(targetRoot, backup);
+        }
+        try {
+            fs_1.default.mkdirSync(path_1.default.dirname(targetRoot), { recursive: true });
+            fs_1.default.renameSync(filesRoot, targetRoot);
+        }
+        catch (error) {
+            if (backup && !fs_1.default.existsSync(targetRoot) && fs_1.default.existsSync(backup))
+                fs_1.default.renameSync(backup, targetRoot);
+            throw error;
+        }
+        dropStudioExportSession(session.id);
+        clearDatasetCatalogCache();
+        appendAudit(targetRoot, {
+            action: "studio.export_commit",
+            actor: session.actor,
+            dataset: session.source,
+            target: session.target,
+            codebaseVersion: infoJson.codebase_version,
+            episodes: Number.isFinite(Number(infoJson.total_episodes)) ? Number(infoJson.total_episodes) : session.files.size,
+            files: session.files.size,
+            bytes: studioExportTotalBytes(session),
+        });
+        persistRuntimeLog("system", "info", `Studio 清洗结果已入库: ${session.source} → ${session.target}`);
+        res.status(201).json({ ok: true, dataset: session.target, source: session.source });
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const code = message.includes("已存在") || message.includes("正在运行") ? 409
+            : message.includes("不完整") || message.includes("缺少") || message.includes("无法识别") ? 422
+                : 500;
+        res.status(code).json({ ok: false, error: message });
     }
 });
 app.post("/api/datasets/:dataset/episodes/:episode/clip", async (req, res) => {
@@ -4450,6 +4742,24 @@ app.get("/health", (req, res) => {
 app.use("/api", (req, res) => {
     res.status(404).json({ ok: false, error: `API 不存在: ${req.method} ${req.originalUrl}` });
 });
+// Studio 作为独立页面托管；它通过 ?manifest= 同源读取平台数据。
+app.use("/studio", express_1.default.static(STUDIO_DIST, {
+    index: "index.html",
+    setHeaders: (res, filePath) => {
+        if (filePath.endsWith("index.html"))
+            res.setHeader("Cache-Control", "no-store, must-revalidate");
+    },
+}));
+app.get("/studio/*splat", (_req, res) => {
+    const indexFile = path_1.default.join(STUDIO_DIST, "index.html");
+    if (fs_1.default.existsSync(indexFile)) {
+        res.setHeader("Cache-Control", "no-store, must-revalidate");
+        res.sendFile(indexFile);
+    }
+    else {
+        res.status(503).json({ ok: false, error: "Studio 尚未构建" });
+    }
+});
 // serve 前端静态文件 (生产模式)。index.html 禁止缓存，避免浏览器一直加载旧的 bundle；
 // 带内容哈希的 assets 才能长期缓存。
 app.use(express_1.default.static(FRONTEND_DIST, {
@@ -4462,24 +4772,6 @@ app.use(express_1.default.static(FRONTEND_DIST, {
         }
     },
 }));
-// LeRobot Studio（数据模块内嵌查看器），需在 SPA fallback 之前挂载。
-app.use("/studio", express_1.default.static(STUDIO_DIST, {
-    setHeaders: (res, filePath) => {
-        if (filePath.endsWith("index.html")) {
-            res.setHeader("Cache-Control", "no-store, must-revalidate");
-        }
-    },
-}));
-app.get("/studio/*splat", (_req, res) => {
-    const indexFile = path_1.default.join(STUDIO_DIST, "index.html");
-    if (fs_1.default.existsSync(indexFile)) {
-        res.setHeader("Cache-Control", "no-store, must-revalidate");
-        res.sendFile(indexFile);
-    }
-    else {
-        res.status(404).json({ ok: false, error: "Studio 未构建，请先运行启动脚本完成 studio 构建" });
-    }
-});
 // SPA fallback (前端未构建时返回提示，不报 404)
 app.use((req, res) => {
     const indexFile = path_1.default.join(FRONTEND_DIST, "index.html");

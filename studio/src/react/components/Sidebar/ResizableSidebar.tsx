@@ -178,13 +178,19 @@ export const ResizableSidebar: React.FC<ResizableSidebarProps> = ({
       </div>
       <div
         ref={splitterRef}
-        className={`relative z-10 flex w-1 shrink-0 cursor-col-resize items-center justify-center bg-border transition-colors duration-200 hover:bg-primary/30 ${
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="拖动调整左侧栏宽度"
+        className={`relative z-10 flex w-2 shrink-0 cursor-col-resize items-center justify-center bg-border transition-colors duration-200 hover:bg-primary/30 ${
           isResizing ? 'bg-primary/60' : ''
         }`}
         onMouseDown={handleMouseDown}
         style={{ cursor: 'col-resize' }}
       >
-        <div className="absolute inset-y-0 left-0 w-4" />
+        <div className="pointer-events-none flex h-12 w-3 items-center justify-center rounded-full border border-border bg-background shadow-sm">
+          <span className="h-6 border-l border-dashed border-muted-foreground/70" />
+        </div>
+        <div className="absolute inset-y-0 -left-1 w-4" />
       </div>
     </>
   );

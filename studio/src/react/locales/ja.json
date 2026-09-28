@@ -725,7 +725,17 @@
     "errorUnknown": "エクスポートに失敗しました",
     "cancelled": "エクスポートをキャンセルしました。",
     "cancelExport": "エクスポートをキャンセル",
-    "versionReadOnly": "このデータセットバージョンはエクスポートに対応しておらず、閲覧のみです。"
+    "versionReadOnly": "このデータセットバージョンはエクスポートに対応しておらず、閲覧のみです。",
+    "platform": "プラットフォームデータセット",
+    "platformTarget": "対象データセット名",
+    "platformTargetHint": "クリーンアップ結果はプラットフォームのデータセット目録へ直接アップロードされ、新しいデータセットとして保存されます。元データセットは変更されません。",
+    "platformOverwrite": "同名のデータセットを置き換える（旧版はゴミ箱へ移動）",
+    "platformCommitted": "プラットフォームデータセットに保存しました: {{target}}",
+    "platformUploaded": "アップロード済み {{bytes}} · {{files}} 個のファイル",
+    "platformNameInvalid": "データセット名は英数字、ドット、アンダースコア、ハイフンのみ使用できます。",
+    "platformNameSameAsSource": "対象名は元データセット名と別にする必要があります。",
+    "keepEditing": "編集を続ける",
+    "done": "完了"
   },
   "dialogs": {
     "remoteArchive": {

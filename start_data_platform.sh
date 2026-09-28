@@ -254,6 +254,16 @@ if [ ! -x "$DIR/robot-server/node_modules/.bin/tsc" ] || [ ! -x "$DIR/frontend/n
     exit 1
 fi
 
+# 构建 Studio 独立页面，固定托管在 /studio/。
+STUDIO_OUTPUT="$DIR/studio/dist/index.html"
+if [ ! -f "$STUDIO_OUTPUT" ] \
+    || [ "$DIR/studio/vite.config.ts" -nt "$STUDIO_OUTPUT" ] \
+    || find "$DIR/studio/src" -type f -newer "$STUDIO_OUTPUT" -print -quit | grep -q .; then
+    echo "Studio 源码有更新，正在构建独立查看页面..."
+    cd "$DIR/studio"
+    BASE_PATH=/studio/ npm run build
+fi
+
 # 生产模式直接由 Robot Server 托管前端。
 FRONTEND_OUTPUT="$DIR/frontend/dist/index.html"
 if [ ! -f "$FRONTEND_OUTPUT" ] \
@@ -262,16 +272,6 @@ if [ ! -f "$FRONTEND_OUTPUT" ] \
     echo "前端源码有更新，正在构建生产资源..."
     cd "$DIR/frontend"
     npm run build
-fi
-
-# LeRobot Studio（数据查看内嵌页面），base 固定为 /studio/。
-STUDIO_OUTPUT="$DIR/studio/dist/index.html"
-if [ ! -f "$STUDIO_OUTPUT" ] \
-    || [ "$DIR/studio/vite.config.ts" -nt "$STUDIO_OUTPUT" ] \
-    || find "$DIR/studio/src" -type f -newer "$STUDIO_OUTPUT" -print -quit | grep -q .; then
-    echo "Studio 源码有更新，正在构建..."
-    cd "$DIR/studio"
-    BASE_PATH=/studio/ npm run build
 fi
 
 # 日常启动直接运行编译后的服务端；仅源文件变化时重新构建。

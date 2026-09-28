@@ -723,7 +723,17 @@
     "errorUnknown": "Export failed",
     "cancelled": "Export cancelled.",
     "cancelExport": "Cancel export",
-    "versionReadOnly": "This dataset version is not supported for export and can only be viewed."
+    "versionReadOnly": "This dataset version is not supported for export and can only be viewed.",
+    "platform": "Platform Dataset",
+    "platformTarget": "Target dataset name",
+    "platformTargetHint": "The cleaned result is uploaded straight into the platform dataset directory as a new dataset. The source dataset is never modified.",
+    "platformOverwrite": "Replace an existing dataset with the same name (moved to trash)",
+    "platformCommitted": "Saved to platform dataset: {{target}}",
+    "platformUploaded": "Uploaded {{bytes}} · {{files}} files",
+    "platformNameInvalid": "Dataset names may only contain letters, numbers, dots, underscores and dashes.",
+    "platformNameSameAsSource": "The target name must differ from the source dataset.",
+    "keepEditing": "Keep editing",
+    "done": "Done"
   },
   "dialogs": {
     "remoteArchive": {

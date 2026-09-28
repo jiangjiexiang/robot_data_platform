@@ -8,15 +8,23 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/ui';
-import { Button } from '@/ui';
+import { Button, Input } from '@/ui';
 import {
   useLeRobotData,
   useLeRobotSelection,
   useLeRobotSubtask,
 } from '../../contexts/LeRobotContext';
-import { canUseFileSystemAccess, detectPlatformCapabilities } from '@/platform';
-import { ExportService } from '@/platform';
-import { WebExportAdapter } from '@/platform';
+import {
+  canUseFileSystemAccess,
+  defaultPlatformTargetName,
+  detectHostPlatform,
+  detectPlatformCapabilities,
+  ExportService,
+  isValidPlatformDatasetName,
+  RemoteExportAdapter,
+  WebExportAdapter,
+} from '@/platform';
+import type { RemoteUploadProgress } from '@/platform';
 import type { ExportFormat } from '@/core';
 import type { ExportProgress } from '@/core';
 import { SubtaskCoverageError } from '@/core';
@@ -24,6 +32,18 @@ import { SubtaskCoverageError } from '@/core';
 export interface ExportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let scaled = value;
+  let unit = 0;
+  while (scaled >= 1024 && unit < units.length - 1) {
+    scaled /= 1024;
+    unit += 1;
+  }
+  return `${scaled >= 10 || unit === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[unit]}`;
 }
 
 export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }) => {
@@ -34,6 +54,8 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
   const { overlay } = useLeRobotSubtask();
 
   const capabilities = useMemo(() => detectPlatformCapabilities(), []);
+  /** 平台宿主（/studio/?manifest=…）里才能直接把清洗结果回传入库。 */
+  const hostPlatform = useMemo(() => detectHostPlatform(), []);
   const versionCapability = dataLoader?.getVersionCapability() ?? null;
 
   const defaultTargetVersion = useMemo((): 'v2.1' | 'v3.0' => {
@@ -42,6 +64,11 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
   }, [versionCapability?.adapterVersion]);
 
   const [format, setFormat] = useState<ExportFormat>('zip');
+  const [destination, setDestination] = useState<'local' | 'platform'>('local');
+  const [platformTarget, setPlatformTarget] = useState('');
+  const [platformOverwrite, setPlatformOverwrite] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<RemoteUploadProgress | null>(null);
+  const [savedDataset, setSavedDataset] = useState<string | null>(null);
   const [targetVersion, setTargetVersion] = useState<'v2.1' | 'v3.0'>(defaultTargetVersion);
   const [includeSubtasks, setIncludeSubtasks] = useState(false);
   const [compactVideos, setCompactVideos] = useState(false);
@@ -57,7 +84,15 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
     if (!open) return;
     setIncludeSubtasks(false);
     setExportError(null);
-  }, [open]);
+    setUploadProgress(null);
+    setSavedDataset(null);
+    if (hostPlatform) {
+      setPlatformTarget(
+        (current) => current || defaultPlatformTargetName(hostPlatform.sourceDataset),
+      );
+      setPlatformOverwrite(false);
+    }
+  }, [open, hostPlatform]);
 
   const handleExport = useCallback(async () => {
     if (!dataLoader || !info) {
@@ -74,8 +109,30 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
       return;
     }
     setExportError(null);
+    const usePlatform = destination === 'platform' && hostPlatform !== null;
+    const platformName = platformTarget.trim();
+    if (usePlatform) {
+      if (!isValidPlatformDatasetName(platformName)) {
+        setExportError(
+          t(
+            'export.platformNameInvalid',
+            'Dataset names may only contain letters, numbers, dots, underscores and dashes.',
+          ),
+        );
+        return;
+      }
+      if (platformName === hostPlatform.sourceDataset) {
+        setExportError(
+          t(
+            'export.platformNameSameAsSource',
+            'The target name must differ from the source dataset.',
+          ),
+        );
+        return;
+      }
+    }
     let directoryHandle: FileSystemDirectoryHandle | null = null;
-    if (format === 'directory') {
+    if (!usePlatform && format === 'directory') {
       if (!canUseFileSystemAccess()) {
         setExportError(
           t(
@@ -103,6 +160,7 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
     }
     abortControllerRef.current = new AbortController();
     const signal = abortControllerRef.current.signal;
+    setUploadProgress(null);
     setProgress({
       phase: 'metadata',
       current: 0,
@@ -119,11 +177,27 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
       }
     };
     try {
-      const adapter = new WebExportAdapter(directoryHandle ? { directoryHandle } : undefined);
+      const adapter =
+        usePlatform && hostPlatform
+          ? new RemoteExportAdapter({
+              source: hostPlatform.sourceDataset,
+              target: platformName,
+              apiBase: hostPlatform.apiBase,
+              overwrite: platformOverwrite,
+              signal,
+              onProgress: (upload) => {
+                try {
+                  setUploadProgress(upload);
+                } catch {
+                  // Ignore if the dialog unmounted mid-upload.
+                }
+              },
+            })
+          : new WebExportAdapter(directoryHandle ? { directoryHandle } : undefined);
       const service = new ExportService(dataLoader, adapter);
       try {
         await service.exportWithData(info, episodesForExport, tasks, {
-          format,
+          format: usePlatform ? 'directory' : format,
           targetVersion,
           onProgress: safeSetProgress,
           includeData: true,
@@ -136,8 +210,14 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
           sourceSubtasks: subtasks,
         });
         abortControllerRef.current = null;
-        onOpenChange(false);
         setProgress(null);
+        setUploadProgress(null);
+        if (usePlatform) {
+          // 保持对话框打开，让用户看到入库结果再关闭。
+          setSavedDataset(platformName);
+        } else {
+          onOpenChange(false);
+        }
       } catch (innerErr) {
         // Always release any in-memory files staged by the adapter so cancelled
         // or failed exports don't leave megabytes of data held in the closure.
@@ -192,6 +272,10 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
     subtasks,
     overlay,
     format,
+    destination,
+    hostPlatform,
+    platformTarget,
+    platformOverwrite,
     targetVersion,
     includeSubtasks,
     compactVideos,
@@ -240,24 +324,76 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
               <div className="flex flex-wrap gap-2">
                 {capabilities.supportedExportFormats.includes('zip') && (
                   <Button
-                    variant={format === 'zip' ? 'default' : 'outline'}
+                    variant={destination === 'local' && format === 'zip' ? 'default' : 'outline'}
                     size="sm"
-                    onClick={() => setFormat('zip')}
+                    onClick={() => {
+                      setDestination('local');
+                      setFormat('zip');
+                    }}
                   >
                     ZIP
                   </Button>
                 )}
                 {capabilities.supportedExportFormats.includes('directory') && (
                   <Button
-                    variant={format === 'directory' ? 'default' : 'outline'}
+                    variant={
+                      destination === 'local' && format === 'directory' ? 'default' : 'outline'
+                    }
                     size="sm"
-                    onClick={() => setFormat('directory')}
+                    onClick={() => {
+                      setDestination('local');
+                      setFormat('directory');
+                    }}
                   >
                     {t('export.directory', 'Local Directory')}
                   </Button>
                 )}
+                {hostPlatform && (
+                  <Button
+                    variant={destination === 'platform' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setDestination('platform')}
+                  >
+                    {t('export.platform', 'Platform Dataset')}
+                  </Button>
+                )}
               </div>
             </div>
+            {destination === 'platform' && hostPlatform ? (
+              <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
+                <label className="text-sm font-medium" htmlFor="export-platform-target">
+                  {t('export.platformTarget', 'Target dataset name')}
+                </label>
+                <Input
+                  id="export-platform-target"
+                  value={platformTarget}
+                  onChange={(event) => setPlatformTarget(event.target.value)}
+                  className="font-mono text-sm"
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    'export.platformTargetHint',
+                    'The cleaned result is uploaded to the platform dataset directory as a new dataset. The source dataset stays untouched.',
+                  )}
+                </p>
+                <label className="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 accent-primary"
+                    checked={platformOverwrite}
+                    onChange={(event) => setPlatformOverwrite(event.target.checked)}
+                  />
+                  <span>
+                    {t(
+                      'export.platformOverwrite',
+                      'Replace an existing dataset with the same name (moved to trash)',
+                    )}
+                  </span>
+                </label>
+              </div>
+            ) : null}
             <div className="space-y-2">
               <span className="text-sm font-medium text-muted-foreground">
                 {t('export.targetVersion', 'Target Version')}
@@ -348,6 +484,16 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
               </p>
             ) : null}
             {exportError && <p className="text-sm text-destructive">{exportError}</p>}
+            {savedDataset && (
+              <p
+                className="rounded-lg border border-primary/40 bg-primary/10 p-3 text-sm"
+                role="status"
+              >
+                {t('export.platformCommitted', 'Saved to platform dataset: {{target}}', {
+                  target: savedDataset,
+                })}
+              </p>
+            )}
             {versionCapability && versionCapability.status !== 'supported' && !exportError && (
               <p className="text-sm text-muted-foreground">
                 {t(
@@ -378,19 +524,36 @@ export const ExportDialog: React.FC<ExportDialogProps> = ({ open, onOpenChange }
                     })
                   : `${progress?.current ?? 0} / ${progress?.total ?? 0}`}
               </p>
+              {uploadProgress ? (
+                <p className="text-xs text-muted-foreground" role="status">
+                  {t('export.platformUploaded', 'Uploaded {{bytes}} · {{files}} files', {
+                    bytes: formatBytes(uploadProgress.uploadedBytes),
+                    files: uploadProgress.fileCount,
+                  })}
+                </p>
+              ) : null}
             </div>
           </div>
         )}
         <DialogFooter>
           {!isExporting ? (
-            <>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
-                {t('common.cancel', 'Cancel')}
-              </Button>
-              <Button onClick={handleExport} disabled={!canExport}>
-                {t('export.export', 'Export')}
-              </Button>
-            </>
+            savedDataset ? (
+              <>
+                <Button variant="outline" onClick={() => setSavedDataset(null)}>
+                  {t('export.keepEditing', 'Keep editing')}
+                </Button>
+                <Button onClick={() => onOpenChange(false)}>{t('export.done', 'Done')}</Button>
+              </>
+            ) : (
+              <>
+                <Button variant="outline" onClick={() => onOpenChange(false)}>
+                  {t('common.cancel', 'Cancel')}
+                </Button>
+                <Button onClick={handleExport} disabled={!canExport}>
+                  {t('export.export', 'Export')}
+                </Button>
+              </>
+            )
           ) : (
             <>
               <Button variant="outline" onClick={() => abortControllerRef.current?.abort()}>
