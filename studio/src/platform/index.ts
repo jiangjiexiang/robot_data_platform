@@ -79,6 +79,7 @@ export {
   detectHostPlatform,
   isValidPlatformDatasetName,
   defaultPlatformTargetName,
+  platformHomeUrl,
   PLATFORM_DATASET_NAME_PATTERN,
 } from './services/hostPlatform';
 export type { HostPlatformContext } from './services/hostPlatform';

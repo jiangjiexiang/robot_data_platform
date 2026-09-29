@@ -52,6 +52,7 @@ interface NavbarProps {
   onOpenUrl?: (url: string) => void;
   onRestoreHistory?: (item: HistoryItem) => void;
   onGoHome?: () => void;
+  homeLabel?: string;
   onExport?: () => void;
   history?: HistoryItem[];
   datasetName?: string;
@@ -71,6 +72,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenUrl,
   onRestoreHistory,
   onGoHome,
+  homeLabel,
   onExport,
   history = [],
   datasetName,
@@ -125,7 +127,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Home className="h-4 w-4" />
               </TooltipTrigger>
-              <TooltipContent side="bottom">{t('navbar.goHome')}</TooltipContent>
+              <TooltipContent side="bottom">{homeLabel || t('navbar.goHome')}</TooltipContent>
             </Tooltip>
           )}
 

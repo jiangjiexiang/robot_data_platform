@@ -54,6 +54,11 @@ function datasetNameFromManifest(manifestUrl: string): string | null {
   }
 }
 
+/** 平台数据列表页（hash 路由）；Studio 与平台同源，用相对路径即可跳回宿主。 */
+export function platformHomeUrl(): string {
+  return '/#datasets';
+}
+
 export function detectHostPlatform(search?: string): HostPlatformContext | null {
   if (typeof window === 'undefined') return null;
   try {

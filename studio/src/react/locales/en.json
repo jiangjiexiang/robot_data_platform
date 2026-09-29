@@ -689,6 +689,7 @@
     "openRemoteArchive": "Remote Archive",
     "history": "History",
     "goHome": "Go to Home",
+    "goPlatform": "Back to Datasets",
     "export": "Export",
     "analysis": "Analysis"
   },

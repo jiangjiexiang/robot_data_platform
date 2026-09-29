@@ -17,7 +17,12 @@ import {
   useLeRobotData,
   useLeRobotUi,
 } from '@';
-import { resolveDroppedItem, type SampleDataset } from '@/platform';
+import {
+  resolveDroppedItem,
+  detectHostPlatform,
+  platformHomeUrl,
+  type SampleDataset,
+} from '@/platform';
 import { SourceController } from '../services/SourceController';
 import { setUrlParamInLocation, type ParsedSourceUrl } from '../utils/sourceUrl';
 import { getDatasetDisplayName } from '@/core';
@@ -95,6 +100,9 @@ export function AppShell() {
   const [sampleDialogOpen, setSampleDialogOpen] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+
+  // 宿主平台环境：左上角首页按钮直接回到平台的数据页
+  const hostPlatform = useMemo(() => detectHostPlatform(), []);
 
   // 启用全局键盘快捷键
   useKeyboardShortcuts(true);
@@ -298,7 +306,15 @@ export function AppShell() {
         onOpenSample={() => setSampleDialogOpen(true)}
         onOpenUrl={(raw) => controller.openFromUrl(raw, 'push')}
         onRestoreHistory={(item) => controller.restoreFromHistory(item)}
-        onGoHome={() => controller.openFromUrl(null, 'push')}
+        onGoHome={() => {
+          if (hostPlatform) {
+            // 平台宿主里：左上角首页回到平台的数据列表
+            window.location.assign(platformHomeUrl());
+            return;
+          }
+          controller.openFromUrl(null, 'push');
+        }}
+        homeLabel={hostPlatform ? t('navbar.goPlatform') : undefined}
         onExport={hasData ? () => setExportDialogOpen(true) : undefined}
         history={history}
         datasetName={info ? datasetName : undefined}

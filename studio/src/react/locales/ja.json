@@ -691,6 +691,7 @@
     "openRemoteArchive": "リモートアーカイブ",
     "history": "履歴",
     "goHome": "ホームへ",
+    "goPlatform": "データセット一覧へ戻る",
     "export": "エクスポート",
     "analysis": "分析"
   },

@@ -689,6 +689,7 @@
     "openRemoteArchive": "远程压缩包",
     "history": "历史记录",
     "goHome": "返回首页",
+    "goPlatform": "返回数据集列表",
     "export": "导出",
     "analysis": "分析"
   },
