@@ -2,8 +2,9 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertCircle, RotateCcw, Home, Copy, Check } from 'lucide-react';
 import { Button } from '@/ui';
+import { detectHostPlatform, platformHomeUrl } from '@/platform';
 import { useLeRobotData } from '../../contexts/LeRobotContext';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 
 interface ErrorStateProps {
   title?: string;
@@ -16,6 +17,8 @@ export const ErrorState: React.FC<ErrorStateProps> = ({ title, message, onRetry,
   const { t } = useTranslation();
   const { reset } = useLeRobotData();
   const [copied, setCopied] = useState(false);
+  // 宿主平台环境：与左上角首页按钮一致，直接回到平台的数据列表
+  const hostPlatform = useMemo(() => detectHostPlatform(), []);
 
   const handleCopy = () => {
     if (errorDetail) {
@@ -70,9 +73,19 @@ export const ErrorState: React.FC<ErrorStateProps> = ({ title, message, onRetry,
             {t('common.retry')}
           </Button>
         )}
-        <Button onClick={reset} variant="outline" className="gap-2">
+        <Button
+          onClick={() => {
+            if (hostPlatform) {
+              window.location.assign(platformHomeUrl());
+              return;
+            }
+            reset();
+          }}
+          variant="outline"
+          className="gap-2"
+        >
           <Home className="h-4 w-4" />
-          {t('navbar.goHome')}
+          {hostPlatform ? t('navbar.goPlatform') : t('navbar.goHome')}
         </Button>
       </div>
     </div>
