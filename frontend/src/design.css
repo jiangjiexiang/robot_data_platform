@@ -27,12 +27,16 @@ button, input, select, textarea { font-family: inherit; }
 .route-title-description { display:block; margin-top:4px; color:var(--dcp-ink-2); font-size:14px; }
 .account-avatar { width: 28px !important; height: 28px !important; padding: 0 !important; border: 0 !important; border-radius: 999px !important; color: #f5f5f7 !important; background: rgba(255,255,255,.1) !important; }
 .account-avatar:hover { background: rgba(255,255,255,.18) !important; }
-.workspace-tabs .el-menu-item { border-bottom: 0 !important; border-radius: 999px !important; }
-.workspace-tabs .el-menu-item.is-active { background: rgba(255,255,255,.1) !important; color: #f5f5f7 !important; }
+.workspace-tabs .el-menu-item { border-bottom: 1px solid transparent !important; border-radius: 0 !important; white-space: nowrap; }
+.workspace-tabs .el-menu-item.is-active { border-bottom-color: #fff !important; background: transparent !important; color: #fff !important; }
 .workspace-tabs .el-menu-item:hover { background: rgba(255,255,255,.08) !important; }
 .topbar-status { display: none !important; }
 .topbar { padding-left: max(24px, calc((100% - 1280px) / 2 + 24px)) !important; padding-right: max(24px, calc((100% - 1280px) / 2 + 24px)) !important; }
-.account-actions { margin-left: 12px !important; }
+.account-actions { margin-left: auto !important; }
+
+@media (max-width: 680px) {
+  .topbar { padding: 8px 12px !important; }
+}
 
 .route-view > .workspace,
 .route-view > .log-workspace,

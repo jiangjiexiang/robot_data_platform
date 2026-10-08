@@ -4,14 +4,14 @@
 适配器接入机械臂，网页服务负责实时控制传输、摄像头、ROS bag 和数据集管理。
 当前仓库提供的第一个设备适配器是 SO-101 Leader/Follower；后续机械臂应实现
 相同的 ROS 2 接口接入，而不是把型号逻辑写进平台。平台范围仅包含遥操作、数据
-采集、回放、审核、上传和裁剪；LeRobot 兼容代码仅用于读写已有数据格式。
+采集、回放和数据管理；数据编辑通过 LeRobot Studio 完成。
 
 当前验收范围是：
 
 - 网页遥操作与多路摄像头预览
 - ROS bag 与 LeRobot 兼容 Dataset 的录制、追加 Episode 和视频编码
 - Dataset/Episode 浏览、同步回放、审核和质量扫描
-- 数据集 rsync 上传到训练主机（含录制后自动上传）和录制片段裁剪界面
+- LeRobot Studio 数据集查看与编辑
 
 ## 系统结构
 
@@ -47,7 +47,7 @@ cd ~/so101_hardware_cpp
 5. 启动托管网页、API、WebSocket 和 WebRTC 的 Robot Server。
 6. 退出时回收本次启动的 ROS2 与网页进程组。
 
-不接机械臂、只用数据平台（浏览 / 回放 / 审核 / 质量扫描 / 裁剪 / 上传）时：
+不接机械臂、只用数据平台（浏览 / 回放 / 审核 / 质量扫描）时：
 
 ```bash
 cd ~/robot_data_platform
@@ -163,17 +163,9 @@ Follower 串口由机器人主机上的 ROS2 hardware plugin 打开。控制来�
 | `DATASET_STREAMING_ENCODING` | `auto` | LeRobot 0.5+ 实时视频编码策略 |
 | `DATASET_VIDEO_CODEC` | `auto` | 视频编码器 |
 
-## 上传数据集到训练主机
-
-「上传训练主机」页面负责把本地数据集（当前为 rosbag 采集目录）用 rsync 增量推送到
-训练主机的约定目录，传输完成后自动做一致性复核；支持保存设置、测试连接、任务进度
-与日志、失败重试，以及"录制保存后自动上传"开关。rosbag → LeRobot 转换与训练都在
-训练主机平台执行。配置步骤和对接约定见 [上传数据集到训练主机](docs/UPLOAD_TO_TRAINING_HOST.md)。
-
 ## ROS bag 转 LeRobot ACT 数据集
 
-历史 ROS bag 数据集中的每个 `episode_0000/` 目录都是一个 MCAP bag。rosbag 数据集
-通过「上传训练主机」页面推送到训练主机后，可用
+历史 ROS bag 数据集中的每个 `episode_0000/` 目录都是一个 MCAP bag。可用
 `tools/rosbag_to_act/rosbag_to_lerobot.py`（随仓库发布，训练主机检出后即可使用）
 将其转换为可供 ACT 训练使用的 LeRobot v3 数据集。转换只读取输入目录，不会修改原始 bag。
 
@@ -268,7 +260,7 @@ so101_act_v1/
 
 1. 填写目标数据集名称（默认 `<原数据集>_approved`）。
 2. 点击「导出已通过片段」。
-3. 导出完成后新数据集出现在「数据资产」列表，可继续查看、审核或上传训练主机。
+3. 导出完成后新数据集出现在「数据资产」列表，可继续查看和审核。
 
 新数据集是一份完整副本：自己的 `meta/info.json`、`meta/episodes`、`meta/tasks`、`meta/stats.json`、
 `data/chunk-000/file-000.parquet`，以及按 Episode 重新拼接的两路相机视频。视频以 CRF 18 重新编码，

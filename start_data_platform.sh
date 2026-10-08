@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 仅数据采集平台一键启动：不启动 SO-101 机械臂、ros2_control 和 ROS2 控制桥。
-# 可用：数据集浏览 / 回放 / 审核 / 质量扫描、录制片段裁剪、上传训练主机、rosbag 转换。
+# 可用：数据集浏览 / 回放 / 审核 / 质量扫描、LeRobot Studio 数据编辑、rosbag 转换。
 # 不可用：网页遥操作与实机录制（需要机械臂时请用 ./start_robot.sh）。
 # 用法: ./start_data_platform.sh
 #
@@ -125,7 +125,7 @@ if [ -z "$PYTHON_PATH" ] || [ ! -x "$PYTHON_PATH" ]; then
     echo "请安装 Python 3 或设置 PYTHON_PATH=/path/to/python3 后重试。"
     exit 1
 fi
-# 数据集浏览、审核和裁剪只依赖标准库；深度质量扫描和 rosbag 转换需要额外依赖。
+# 数据集浏览和审核只依赖标准库；深度质量扫描和 rosbag 转换需要额外依赖。
 if ! "$PYTHON_PATH" -c "import json, pathlib" >/dev/null 2>&1; then
     echo "错误: Python 无法运行: $PYTHON_PATH"
     exit 1

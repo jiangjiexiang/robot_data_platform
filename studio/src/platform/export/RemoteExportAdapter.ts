@@ -101,7 +101,7 @@ export class RemoteExportAdapter implements ExportAdapter {
     this.target = options.target.trim();
     this.apiBase = (options.apiBase ?? '').replace(/\/+$/, '');
     this.overwrite = options.overwrite === true;
-    this.actor = options.actor ?? 'LeRobot Studio';
+    this.actor = options.actor ?? '通用机械臂数据平台';
     this.preferredChunkBytes =
       Number.isFinite(options.chunkSizeBytes) && (options.chunkSizeBytes ?? 0) > 0
         ? (options.chunkSizeBytes as number)

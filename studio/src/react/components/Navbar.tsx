@@ -281,7 +281,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               aria-hidden
             />
           ) : !datasetName ? (
-            <img src="logo.svg" alt="LeRobot Studio Logo" className="h-5 w-5 opacity-90" />
+            <img src="logo.svg" alt={t('common.appName')} className="h-5 w-5 opacity-90" />
           ) : null}
           <span
             className={`block min-w-0 truncate text-sm font-semibold tracking-tight ${isLoading ? 'text-muted-foreground animate-pulse' : ''}`}

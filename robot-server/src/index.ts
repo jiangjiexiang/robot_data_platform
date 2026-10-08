@@ -24,11 +24,7 @@ const TELEOP_SCRIPT = path.join(BRIDGE_DIR, "teleop_robot.py");
 const PLAYBACK_SCRIPT = path.join(BRIDGE_DIR, "dataset_playback.py");
 const ROSBAG_PLAYBACK_SCRIPT = path.join(BRIDGE_DIR, "rosbag_playback.py");
 const DATASET_CATALOG_SCRIPT = path.join(BRIDGE_DIR, "dataset_catalog.py");
-const ROSBAG_VIDEO_CONVERTER_SCRIPT = path.join(BRIDGE_DIR, "rosbag_to_mp4.py");
-const ROSBAG_CLIP_SCRIPT = path.join(BRIDGE_DIR, "clip_rosbag.py");
-const ROSBAG_JOINT_STATE_SCRIPT = path.join(BRIDGE_DIR, "rosbag_joint_states.py");
 const DATASET_EXPORT_SCRIPT = path.join(BRIDGE_DIR, "dataset_export.py");
-const VIDEO_TRIM_SCRIPT = path.join(BRIDGE_DIR, "trim_videos.py");
 const PYTHON_PATH = process.env.PYTHON_PATH || "python3";
 const ROS_PYTHON_PATH = process.env.ROS_PYTHON_PATH || "/usr/bin/python3.10";
 const CONTROL_PYTHON_PATH = PYTHON_PATH;
@@ -52,7 +48,7 @@ const DATASET_ROOT = path.resolve(process.env.DATASET_ROOT || (
 ));
 const ENABLE_CAMERA = process.env.ENABLE_CAMERA !== "0" && process.env.ENABLE_CAMERA !== "false";
 // 仅数据平台模式：不连接任何机械臂，不启动 ROS2 桥接，也不占用串口。
-// 数据管理、回放、审核、裁剪和上传仍然可用，遥操作与实机录制不可用。
+// 数据管理、回放和审核仍然可用，遥操作与实机录制不可用。
 const DATA_ONLY = process.env.DATA_ONLY === "1" || process.env.DATA_ONLY === "true";
 // ROS compressed image topics are the canonical camera source. CAMERA_SOURCE=usb
 // remains available for deployments that need direct GStreamer capture.
@@ -742,7 +738,7 @@ if (ENABLE_CAMERA) {
   console.log("[Camera] 默认关闭；需要摄像头时设置 ENABLE_CAMERA=1");
 }
 
-type RecordingState = "idle" | "preparing" | "recording" | "saving" | "error";
+type RecordingState = "idle" | "preparing" | "recording" | "saving" | "ready" | "error";
 interface RecordingStatus {
   state: RecordingState;
   dataset: string | null;
@@ -752,13 +748,26 @@ interface RecordingStatus {
   path: string | null;
   error: string | null;
   plannedEpisodes: number;
+  completedEpisodes: number;
   episodeTime: number;
-  resetTime: number;
+  continuous: boolean;
   resume: boolean;
   lastResult: "saved" | "discarded" | null;
 }
 
+interface RecordingSession {
+  dataset: string;
+  task: string;
+  nextEpisode: number;
+  completedEpisodes: number;
+  plannedEpisodes: number;
+  episodeTime: number;
+  continuous: boolean;
+  active: boolean;
+}
+
 let recorder: BagRecorderProcess | null = null;
+let recordingSession: RecordingSession | null = null;
 let recordingEpisodeDir: string | null = null;
 let recordingSidecarPath: string | null = null;
 let recordingAutoStopTimer: NodeJS.Timeout | null = null;
@@ -770,7 +779,7 @@ let playback: RobotBridge | null = null;
 let playbackStatus: PlaybackStatus = { state: "idle", dataset: null, episode: null, frame: 0, frames: 0, fps: 0, speed: 1, error: null };
 let recordingStatus: RecordingStatus = {
   state: "idle", dataset: null, task: null, startedAt: null,
-  episode: null, path: null, error: null, plannedEpisodes: 1, episodeTime: 20, resetTime: 0, resume: true,
+  episode: null, path: null, error: null, plannedEpisodes: 1, completedEpisodes: 0, episodeTime: 20, continuous: false, resume: true,
   lastResult: null,
 };
 
@@ -797,73 +806,156 @@ function finalizeRecordingSidecar(endedAt: number): void {
   }
 }
 
-function convertRecordingVideos(episodeDir: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile(ROS_PYTHON_PATH, [ROSBAG_VIDEO_CONVERTER_SCRIPT, episodeDir], { timeout: 600_000, maxBuffer: 2 * 1024 * 1024 }, (error, _stdout, stderr) => {
-      if (error) {
-        reject(new Error(stderr.trim() || `视频转换失败: ${error.message}`));
-        return;
-      }
-      resolve();
-    });
-  });
+function captureReady(): boolean {
+  const now = Date.now();
+  return Boolean(
+    latestObservation
+    && hasCompleteCaptureJoints(latestObservation)
+    && now - latestObservationAt <= RECORDING_MAX_SENSOR_AGE_MS
+    && latestCameraFrame
+    && latestCamera2Frame
+    && now - cameraLastFrameAt <= RECORDING_MAX_SENSOR_AGE_MS
+    && now - camera2LastFrameAt <= RECORDING_MAX_SENSOR_AGE_MS
+    && Math.abs(cameraLastFrameAt - camera2LastFrameAt) <= RECORDING_MAX_CAMERA_SKEW_MS,
+  );
 }
 
-async function ensureRosbagVideos(dataset: string, detail: Record<string, unknown>): Promise<boolean> {
-  const episodes = Array.isArray(detail.episodes) ? detail.episodes : [];
-  let converted = false;
-  for (const episode of episodes) {
-    const item = episode as Record<string, unknown>;
-    const index = Number(item.episode);
-    const videos = item.videos;
-    if (!Number.isInteger(index)) continue;
-    const directory = path.join(datasetPath(dataset), `episode_${String(index).padStart(4, "0")}`);
-    if (!fs.existsSync(directory) || !fs.readdirSync(directory).some((name) => name.endsWith(".mcap"))) continue;
-    const manifestPath = path.join(directory, "video_manifest.json");
-    let h264Ready = false;
-    try {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as Record<string, { codec?: string }>;
-      h264Ready = Object.keys(videos || {}).length > 0
-        && Object.values(manifest).some((entry) => entry?.codec === "h264-baseline");
-    } catch { /* Convert missing or legacy video manifests. */ }
-    if (h264Ready) continue;
-    await convertRecordingVideos(directory);
-    converted = true;
+function startRecordingEpisode(session: RecordingSession): boolean {
+  if (!session.active || !bridge?.isRunning() || stopping) return false;
+  if (!captureReady()) {
+    recordingSession = null;
+    session.active = false;
+    recordingStatus = { ...recordingStatus, state: "error", error: "下一轮无法开始：实时关节或双路相机数据已过期" };
+    publishRecordingStatus();
+    return false;
   }
-  return converted;
+  const episode = session.nextEpisode;
+  const datasetDir = path.join(DATASET_ROOT, session.dataset);
+  const episodeDir = path.join(datasetDir, `episode_${String(episode).padStart(4, "0")}`);
+  const sidecarPath = `${episodeDir}.json`;
+  fs.mkdirSync(datasetDir, { recursive: true });
+  fs.writeFileSync(sidecarPath, JSON.stringify({
+    dataset: session.dataset, task: session.task, robotType: "so101_follower", episode, startedAt: Date.now(), endedAt: null,
+  }, null, 2));
+
+  const startedRecorder = new BagRecorderProcess(episodeDir, BAG_RECORD_TOPICS);
+  startedRecorder.on("log", ({ level, message }: { level: "info" | "warn" | "error"; message: string }) => {
+    persistRuntimeLog("recorder", level, message);
+    broadcastControl({ type: "bridge_log", source: "recorder", level, message });
+  });
+  recorder = startedRecorder;
+  recordingEpisodeDir = episodeDir;
+  recordingSidecarPath = sidecarPath;
+  recordingStopInFlight = false;
+  recordingStatus = {
+    ...recordingStatus,
+    state: "preparing", dataset: session.dataset, task: session.task, startedAt: null,
+    episode, path: episodeDir, error: null, plannedEpisodes: session.plannedEpisodes,
+    completedEpisodes: session.completedEpisodes, episodeTime: session.episodeTime,
+    continuous: session.continuous,
+    resume: true, lastResult: null,
+  };
+
+  startedRecorder.on("ready", () => {
+    if (recorder !== startedRecorder) return;
+    recordingStatus = { ...recordingStatus, state: "recording", startedAt: Date.now() };
+    publishRecordingStatus();
+    clearRecordingAutoStopTimer();
+    if (!session.continuous) {
+      recordingAutoStopTimer = setTimeout(() => requestRecordingSave(true), session.episodeTime * 1000).unref();
+    }
+  });
+  startedRecorder.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+    if (recorder !== startedRecorder || recordingStopInFlight) return;
+    recorder = null;
+    clearRecordingAutoStopTimer();
+    if (recordingIsActive()) {
+      session.active = false;
+      recordingSession = null;
+      recordingStatus = {
+        ...recordingStatus,
+        state: "error",
+        error: recordingStatus.error || `录制进程意外退出 (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+      };
+      publishRecordingStatus();
+    }
+  });
+  startedRecorder.on("error", (error: Error) => {
+    if (recorder !== startedRecorder) return;
+    clearRecordingAutoStopTimer();
+    session.active = false;
+    recordingSession = null;
+    recordingStatus = { ...recordingStatus, state: "error", error: error.message };
+    publishRecordingStatus();
+  });
+  startedRecorder.start();
+  publishRecordingStatus();
+  return true;
 }
 
-function requestRecordingSave(): boolean {
+function advanceRecordingSession(session: RecordingSession): void {
+  if (!session.active || recordingSession !== session) return;
+  if (session.completedEpisodes >= session.plannedEpisodes) {
+    session.active = false;
+    recordingSession = null;
+    recordingStatus = { ...recordingStatus, state: "idle", lastResult: "saved" };
+    publishRecordingStatus();
+    return;
+  }
+  session.nextEpisode += 1;
+  recordingStatus = {
+    ...recordingStatus,
+    state: "ready",
+    startedAt: null,
+    episode: session.nextEpisode,
+    completedEpisodes: session.completedEpisodes,
+    lastResult: "saved",
+  };
+  publishRecordingStatus();
+}
+
+function requestRecordingSave(continueSession = false): boolean {
   if (!recorder?.isRunning() || !["preparing", "recording"].includes(recordingStatus.state)) return false;
   clearRecordingAutoStopTimer();
   recordingStatus = { ...recordingStatus, state: "saving" };
   publishRecordingStatus();
   recordingStopInFlight = true;
   const activeRecorder = recorder;
+  const session = recordingSession;
   void activeRecorder.stop().then(async () => {
     if (recorder !== activeRecorder) return;
     recorder = null;
     recordingStopInFlight = false;
     finalizeRecordingSidecar(Date.now());
-    try {
-      await convertRecordingVideos(activeRecorder.getOutputDir());
-    } catch (error) {
-      console.error("[Server] 录制视频转换失败:", error);
-    }
     clearDatasetCatalogCache(recordingStatus.dataset || undefined);
-    const savedDataset = recordingStatus.dataset;
-    recordingStatus = { ...recordingStatus, state: "idle", lastResult: "saved" };
-    publishRecordingStatus();
-    // 上传设置里开启“自动上传”时，录制保存完成后立即把该数据集入队推送训练主机。
-    if (savedDataset && readUploadSettings().enabled && !activeUploadTaskFor(savedDataset)) {
-      queueDatasetUpload(savedDataset, "自动上传");
+    if (session && session.active) {
+      session.completedEpisodes += 1;
+      recordingStatus = { ...recordingStatus, completedEpisodes: session.completedEpisodes, lastResult: "saved" };
+      if (continueSession && session.completedEpisodes < session.plannedEpisodes) {
+        advanceRecordingSession(session);
+      } else {
+        session.active = false;
+        recordingSession = null;
+        recordingStatus = { ...recordingStatus, state: "idle" };
+        publishRecordingStatus();
+      }
+    } else {
+      recordingStatus = { ...recordingStatus, state: "idle", lastResult: "saved" };
+      publishRecordingStatus();
     }
   });
   return true;
 }
 
 function requestRecordingCancel(): boolean {
-  if (!recorder?.isRunning() || !["preparing", "recording"].includes(recordingStatus.state)) return false;
+  if (!recorder?.isRunning() || !["preparing", "recording"].includes(recordingStatus.state)) {
+    if (recordingStatus.state !== "ready" || !recordingSession) return false;
+    recordingSession.active = false;
+    recordingSession = null;
+    recordingStatus = { ...recordingStatus, state: "idle", lastResult: "discarded" };
+    publishRecordingStatus();
+    return true;
+  }
   clearRecordingAutoStopTimer();
   recordingStatus = { ...recordingStatus, state: "saving" };
   publishRecordingStatus();
@@ -871,6 +963,10 @@ function requestRecordingCancel(): boolean {
   const activeRecorder = recorder;
   const dirToRemove = recordingEpisodeDir;
   const sidecarToRemove = recordingSidecarPath;
+  if (recordingSession) {
+    recordingSession.active = false;
+    recordingSession = null;
+  }
   void activeRecorder.stop().then(() => {
     if (recorder !== activeRecorder) return;
     recorder = null;
@@ -891,8 +987,55 @@ function requestRecordingCancel(): boolean {
   return true;
 }
 
+function requestRecordingFinish(): boolean {
+  if (recorder?.isRunning() && ["preparing", "recording"].includes(recordingStatus.state)) {
+    return requestRecordingSave(false);
+  }
+  if (recordingStatus.state !== "ready" || !recordingSession) return false;
+  recordingSession.active = false;
+  recordingSession = null;
+  recordingStatus = { ...recordingStatus, state: "idle", lastResult: "saved" };
+  publishRecordingStatus();
+  return true;
+}
+
+function requestRecordingBeginNext(): boolean {
+  if (recordingStatus.state !== "ready" || !recordingSession?.active) return false;
+  return startRecordingEpisode(recordingSession);
+}
+
+function requestRecordingRetry(): boolean {
+  if (!recorder?.isRunning() || !recordingSession?.active || !["preparing", "recording"].includes(recordingStatus.state)) return false;
+  clearRecordingAutoStopTimer();
+  recordingStatus = { ...recordingStatus, state: "saving" };
+  publishRecordingStatus();
+  recordingStopInFlight = true;
+  const activeRecorder = recorder;
+  const directory = recordingEpisodeDir;
+  const sidecar = recordingSidecarPath;
+  const session = recordingSession;
+  void activeRecorder.stop().then(() => {
+    if (recorder !== activeRecorder || recordingSession !== session) return;
+    recorder = null;
+    recordingStopInFlight = false;
+    try { if (directory) fs.rmSync(directory, { recursive: true, force: true }); }
+    catch (error) { console.error("[Server] 删除待重录片段失败:", error); }
+    try { if (sidecar) fs.rmSync(sidecar, { force: true }); }
+    catch { /* best effort */ }
+    clearDatasetCatalogCache(session.dataset);
+    recordingStatus = {
+      ...recordingStatus,
+      state: "ready",
+      startedAt: null,
+      lastResult: "discarded",
+    };
+    publishRecordingStatus();
+  });
+  return true;
+}
+
 function recordingIsActive(): boolean {
-  return ["preparing", "recording", "saving"].includes(recordingStatus.state);
+  return ["preparing", "recording", "saving", "ready"].includes(recordingStatus.state);
 }
 
 function playbackIsActive(): boolean {
@@ -914,7 +1057,7 @@ function stopPlayback(): boolean {
 function cleanDatasetName(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const name = value.trim();
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name) ? name : null;
+  return /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/.test(name) ? name : null;
 }
 
 function datasetPath(name: string): string {
@@ -2061,9 +2204,8 @@ app.get("/api/datasets", async (req, res) => {
 
 app.delete("/api/datasets/:dataset", (req, res) => {
   const dataset = cleanDatasetName(req.params.dataset);
-  const confirmation = cleanShortText(req.body?.confirmation, 120);
-  if (!dataset || confirmation !== dataset) {
-    res.status(400).json({ ok: false, error: "请输入完整数据集名称确认删除" });
+  if (!dataset) {
+    res.status(400).json({ ok: false, error: "数据集名称无效" });
     return;
   }
   if (recordingStatus.dataset === dataset && recordingStatus.state !== "idle" && recordingStatus.state !== "error") {
@@ -2118,11 +2260,7 @@ app.get("/api/datasets/:dataset", async (req, res) => {
     return;
   }
   try {
-    let detail = await runDatasetCatalog("detail", dataset, req.query.refresh === "1");
-    if (await ensureRosbagVideos(dataset, detail)) {
-      clearDatasetCatalogCache(dataset);
-      detail = await runDatasetCatalog("detail", dataset, true);
-    }
+    const detail = await runDatasetCatalog("detail", dataset, req.query.refresh === "1");
     const episodes = Array.isArray(detail.episodes) ? detail.episodes.map((episode) => {
       const item = episode as Record<string, unknown>;
       const ranges = item.videoRanges && typeof item.videoRanges === "object" ? item.videoRanges as Record<string, { start?: number; end?: number }> : {};
@@ -2574,74 +2712,6 @@ app.post("/api/studio-export/sessions/:id/commit", (req, res) => {
   }
 });
 
-app.post("/api/datasets/:dataset/episodes/:episode/clip", async (req, res) => {
-  const dataset = cleanDatasetName(req.params.dataset);
-  const episode = Number(req.params.episode);
-  const start = Number(req.body?.start);
-  const end = Number(req.body?.end);
-  if (!dataset || !Number.isInteger(episode) || episode < 0 || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
-    res.status(400).json({ ok: false, error: "数据集、片段或裁剪区间无效" });
-    return;
-  }
-  const source = path.join(datasetPath(dataset), `episode_${String(episode).padStart(4, "0")}`);
-  if (!fs.existsSync(source)) { res.status(404).json({ ok: false, error: "找不到录制片段" }); return; }
-  const clipId = `clip-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const clipRoot = path.join(datasetPath(dataset), ".clips", clipId);
-  const bagRoot = path.join(clipRoot, "bag");
-  const videoRoot = path.join(clipRoot, "videos");
-  try {
-    await new Promise<void>((resolve, reject) => execFile(ROS_PYTHON_PATH, [ROSBAG_CLIP_SCRIPT, source, bagRoot, "--start", String(start), "--end", String(end)], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 }, (error, _stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve()));
-    const bagFile = fs.readdirSync(bagRoot).find((name) => name.endsWith(".mcap"));
-    if (!bagFile) throw new Error("裁剪后没有生成 MCAP 文件");
-    await new Promise<void>((resolve, reject) => execFile(ROS_PYTHON_PATH, [ROSBAG_VIDEO_CONVERTER_SCRIPT, bagRoot, "--output", videoRoot], { timeout: 600_000, maxBuffer: 2 * 1024 * 1024 }, (error, _stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve()));
-    const videos = fs.existsSync(videoRoot) ? fs.readdirSync(videoRoot).filter((name) => name.endsWith(".mp4")).map((name) => ({ name, url: `/api/datasets/${encodeURIComponent(dataset)}/clips/${encodeURIComponent(clipId)}/video/${encodeURIComponent(name)}` })) : [];
-    res.json({ ok: true, clipId, bagUrl: `/api/datasets/${encodeURIComponent(dataset)}/clips/${encodeURIComponent(clipId)}/bag`, videos });
-  } catch (error) {
-    try { fs.rmSync(clipRoot, { recursive: true, force: true }); } catch { /* best effort */ }
-    res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.get("/api/datasets/:dataset/episodes/:episode/joints", (req, res) => {
-  const dataset = cleanDatasetName(req.params.dataset);
-  const episode = Number(req.params.episode);
-  if (!dataset || !Number.isInteger(episode) || episode < 0) { res.status(400).json({ ok: false, error: "数据集或 episode 无效" }); return; }
-  const source = path.join(datasetPath(dataset), `episode_${String(episode).padStart(4, "0")}`);
-  if (!fs.existsSync(source)) { res.status(404).json({ ok: false, error: "找不到录制片段" }); return; }
-  execFile(ROS_PYTHON_PATH, [ROSBAG_JOINT_STATE_SCRIPT, source], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
-    if (error) { res.status(500).json({ ok: false, error: stderr.trim() || error.message }); return; }
-    try { res.json({ ok: true, samples: JSON.parse(stdout) }); }
-    catch { res.status(500).json({ ok: false, error: "关节状态数据格式无效" }); }
-  });
-});
-
-app.get("/api/datasets/:dataset/clips/:clip/bag", (req, res) => {
-  const dataset = cleanDatasetName(req.params.dataset);
-  const clip = /^[A-Za-z0-9_-]+$/.test(req.params.clip) ? req.params.clip : "";
-  if (!dataset || !clip) { res.status(400).json({ ok: false, error: "裁剪参数无效" }); return; }
-  try {
-    const root = fs.realpathSync(path.join(datasetPath(dataset), ".clips", clip, "bag"));
-    const file = fs.readdirSync(root).find((name) => name.endsWith(".mcap"));
-    if (!file) throw new Error("找不到裁剪后的 bag");
-    const target = path.join(root, file);
-    const stat = fs.statSync(target);
-    res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader("Content-Length", stat.size);
-    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(file)}`);
-    fs.createReadStream(target).pipe(res);
-  } catch (error) { res.status(404).json({ ok: false, error: error instanceof Error ? error.message : "找不到裁剪后的 bag" }); }
-});
-
-app.get("/api/datasets/:dataset/clips/:clip/video/:file", (req, res) => {
-  const dataset = cleanDatasetName(req.params.dataset);
-  const clip = /^[A-Za-z0-9_-]+$/.test(req.params.clip) ? req.params.clip : "";
-  const file = /^camera[12]\.mp4$/.test(req.params.file) ? req.params.file : "";
-  if (!dataset || !clip || !file) { res.status(400).json({ ok: false, error: "视频参数无效" }); return; }
-  try { sendVideoFile(fs.realpathSync(path.join(datasetPath(dataset), ".clips", clip, "videos", file)), req, res); }
-  catch (error) { res.status(404).json({ ok: false, error: error instanceof Error ? error.message : "找不到裁剪视频" }); }
-});
-
-
 app.patch("/api/datasets/:dataset/episodes/:episode/review", (req, res) => {
   const dataset = cleanDatasetName(req.params.dataset);
   const episode = Number(req.params.episode);
@@ -2896,493 +2966,6 @@ app.get("/api/datasets/:dataset/audit", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// 数据交付：把本地数据集（rosbag 采集目录）用 rsync 推送到训练主机。
-// rosbag → LeRobot 转换与训练都在独立的训练主机平台完成；这里只保证
-// 数据集以 <remoteRoot>/<dataset>/ 布局完整落到远端，并做 dry-run 复核。
-// ---------------------------------------------------------------------------
-
-const SIDECAR_ROOT = path.join(DATASET_ROOT, ".lerobot-web");
-const UPLOAD_SETTINGS_FILE = path.join(SIDECAR_ROOT, "upload-settings.json");
-const UPLOAD_TASKS_FILE = path.join(SIDECAR_ROOT, "upload-tasks.json");
-
-interface UploadSettings {
-  enabled: boolean;
-  /** ssh: rsync over SSH（密钥免密）；rsyncd: rsync 守护进程（局域网免认证）。 */
-  method: "ssh" | "rsyncd";
-  host: string;
-  port: number;
-  user: string;
-  remoteRoot: string;
-  /** rsyncd 模式的模块名，对应训练主机 /etc/rsyncd.conf 里的 [module]。 */
-  module: string;
-  retries: number;
-  updatedAt: string | null;
-}
-
-type UploadTaskState = "queued" | "running" | "success" | "failed";
-
-interface UploadTask {
-  id: string;
-  dataset: string;
-  state: UploadTaskState;
-  progress: number;
-  transferredBytes: number;
-  attempts: number;
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-  exitCode: number | null;
-  error: string | null;
-  logs: string[];
-  verifiedAt: string | null;
-}
-
-const DEFAULT_UPLOAD_SETTINGS: UploadSettings = {
-  enabled: false, method: "ssh", host: "", port: 22, user: "", remoteRoot: "/data/lerobot", module: "lerobot", retries: 3, updatedAt: null,
-};
-
-function readUploadSettings(): UploadSettings {
-  try {
-    const value = JSON.parse(fs.readFileSync(UPLOAD_SETTINGS_FILE, "utf-8")) as Partial<UploadSettings>;
-    return {
-      enabled: Boolean(value.enabled),
-      method: value.method === "rsyncd" ? "rsyncd" : "ssh",
-      host: typeof value.host === "string" ? value.host : "",
-      port: Number.isInteger(value.port) ? Number(value.port) : DEFAULT_UPLOAD_SETTINGS.port,
-      user: typeof value.user === "string" ? value.user : "",
-      remoteRoot: typeof value.remoteRoot === "string" ? value.remoteRoot : DEFAULT_UPLOAD_SETTINGS.remoteRoot,
-      module: typeof value.module === "string" && value.module ? value.module : DEFAULT_UPLOAD_SETTINGS.module,
-      retries: Number.isInteger(value.retries) ? Number(value.retries) : 3,
-      updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : null,
-    };
-  } catch {
-    return { ...DEFAULT_UPLOAD_SETTINGS };
-  }
-}
-
-function writeUploadSettings(settings: UploadSettings): void {
-  fs.mkdirSync(SIDECAR_ROOT, { recursive: true });
-  const temporary = `${UPLOAD_SETTINGS_FILE}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(settings, null, 2) + "\n", "utf-8");
-  fs.renameSync(temporary, UPLOAD_SETTINGS_FILE);
-}
-
-function readUploadTasks(): UploadTask[] {
-  try {
-    const value = JSON.parse(fs.readFileSync(UPLOAD_TASKS_FILE, "utf-8"));
-    return Array.isArray(value.tasks) ? value.tasks : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeUploadTasks(tasks: UploadTask[]): void {
-  fs.mkdirSync(SIDECAR_ROOT, { recursive: true });
-  const temporary = `${UPLOAD_TASKS_FILE}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify({ tasks: tasks.slice(-100) }, null, 2) + "\n", "utf-8");
-  fs.renameSync(temporary, UPLOAD_TASKS_FILE);
-}
-
-function updateUploadTask(id: string, mutate: (task: UploadTask) => void): UploadTask | null {
-  const tasks = readUploadTasks();
-  const task = tasks.find((item) => item.id === id);
-  if (!task) return null;
-  mutate(task);
-  writeUploadTasks(tasks);
-  return task;
-}
-
-function failUploadTask(id: string, message: string): void {
-  updateUploadTask(id, (task) => {
-    task.state = "failed";
-    task.error = message.slice(0, 400);
-    task.finishedAt = new Date().toISOString();
-    task.logs = [...task.logs, `错误: ${message}`].slice(-300);
-  });
-}
-
-function validateUploadSettings(body: Record<string, unknown>): { settings?: UploadSettings; error?: string } {
-  const enabled = Boolean(body.enabled);
-  const method = body.method === "rsyncd" ? "rsyncd" : "ssh";
-  const host = String(body.host || "").trim();
-  const port = body.port === undefined || body.port === null || body.port === ""
-    ? (method === "rsyncd" ? 873 : 22) : Number(body.port);
-  const user = String(body.user || "").trim();
-  const remoteRoot = String(body.remoteRoot || "").trim();
-  const module = String(body.module || "lerobot").trim();
-  const retries = body.retries === undefined || body.retries === null || body.retries === "" ? 3 : Number(body.retries);
-  if (host && !/^(?:[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*|(?:\d{1,3}\.){3}\d{1,3})$/.test(host)) return { error: "训练主机地址无效" };
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: "端口无效" };
-  if (user && !/^[A-Za-z0-9._-]{1,64}$/.test(user)) return { error: "SSH 用户名无效" };
-  if (method === "ssh" && (!/^\/[A-Za-z0-9._/-]{0,126}$/.test(remoteRoot) || remoteRoot.includes(".."))) {
-    return { error: "远端根目录必须是无空格的绝对路径，例如 /data/lerobot" };
-  }
-  if (method === "rsyncd" && !/^[A-Za-z0-9._-]{1,64}$/.test(module)) return { error: "rsync 模块名无效" };
-  if (!Number.isInteger(retries) || retries < 0 || retries > 5) return { error: "重试次数需为 0-5" };
-  if (enabled && !host) return { error: "启用自动上传前请填写训练主机地址" };
-  if (enabled && method === "ssh" && !user) return { error: "SSH 方式启用自动上传前请填写用户名" };
-  return { settings: { enabled, method, host, port, user, remoteRoot, module, retries, updatedAt: new Date().toISOString() } };
-}
-
-function uploadDestination(settings: UploadSettings, dataset: string): string {
-  return settings.method === "rsyncd"
-    ? `rsync://${settings.host}:${settings.port}/${settings.module}/${dataset}/`
-    : `${settings.user}@${settings.host}:${settings.remoteRoot}/${dataset}/`;
-}
-
-function rsyncTransportArgs(settings: UploadSettings): string[] {
-  if (settings.method === "rsyncd") return [];
-  return ["-e", settings.port === 22 ? "ssh" : `ssh -p ${settings.port}`];
-}
-
-function describeSshFailure(message: string): string {
-  const lower = message.toLowerCase();
-  if (lower.includes("permission denied") || lower.includes("publickey")) {
-    return "SSH 公钥未授权：请把本机公钥加入训练主机的 ~/.ssh/authorized_keys 后重试";
-  }
-  if (lower.includes("timed out") || lower.includes("no route to host") || lower.includes("connection refused")) {
-    return "无法连接训练主机：请检查 IP、端口和局域网连通性";
-  }
-  return message.split("\n").filter(Boolean).pop() || "连接训练主机失败";
-}
-
-// ---------------------------------------------------------------------------
-// 上传/转换任务队列（顺序执行，一次一个，避免占满局域网带宽和磁盘 IO）
-// ---------------------------------------------------------------------------
-
-interface UploadRuntime {
-  lines: string[];
-  progress: number;
-  transferredBytes: number;
-  timer: NodeJS.Timeout | null;
-}
-
-const uploadRuntime = new Map<string, UploadRuntime>();
-const uploadProcesses = new Map<string, ChildProcess>();
-
-function getUploadRuntime(taskId: string): UploadRuntime {
-  let runtime = uploadRuntime.get(taskId);
-  if (!runtime) {
-    runtime = { lines: [], progress: 0, transferredBytes: 0, timer: null };
-    uploadRuntime.set(taskId, runtime);
-  }
-  return runtime;
-}
-
-function flushUploadRuntime(taskId: string): void {
-  const runtime = uploadRuntime.get(taskId);
-  if (!runtime) return;
-  const lines = runtime.lines.splice(0, runtime.lines.length);
-  if (!lines.length && runtime.progress === 0) return;
-  updateUploadTask(taskId, (task) => {
-    if (lines.length) task.logs = [...task.logs, ...lines].slice(-300);
-    if (runtime.progress > task.progress) task.progress = runtime.progress;
-    if (runtime.transferredBytes > task.transferredBytes) task.transferredBytes = runtime.transferredBytes;
-  });
-}
-
-// onLine 返回 true 表示该行已被消费（如 rsync 进度行），不再写入任务日志。
-function runLoggedProcess(processKey: string, taskId: string, command: string, args: string[], onLine?: (line: string) => boolean | void): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  return new Promise((resolve) => {
-    const runtime = getUploadRuntime(taskId);
-    runtime.lines.push(`$ ${command} ${args.join(" ")}`.slice(0, 500));
-    const child = spawn(command, args, { env: { ...process.env, PYTHONUNBUFFERED: "1", LC_ALL: "C" } });
-    uploadProcesses.set(processKey, child);
-    const timer = setInterval(() => flushUploadRuntime(taskId), 500);
-    runtime.timer = timer;
-    let buffer = "";
-    const consume = (chunk: Buffer) => {
-      buffer += chunk.toString("utf-8").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\r/g, "\n");
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines.map((value) => value.trimEnd())) {
-        if (!line || line.includes("%|") || line.includes("it/s]")) continue;
-        if (onLine?.(line) !== true) runtime.lines.push(line);
-      }
-    };
-    child.stdout?.on("data", consume);
-    child.stderr?.on("data", consume);
-    child.on("error", (error) => {
-      uploadProcesses.delete(processKey);
-      clearInterval(timer);
-      flushUploadRuntime(taskId);
-      uploadRuntime.delete(taskId);
-      failUploadTask(taskId, `进程启动失败: ${error.message}`);
-      resolve({ code: -1, signal: null });
-    });
-    child.on("exit", (code, signal) => {
-      uploadProcesses.delete(processKey);
-      clearInterval(timer);
-      if (buffer.trim() && onLine?.(buffer.trim()) !== true) runtime.lines.push(buffer.trim());
-      flushUploadRuntime(taskId);
-      uploadRuntime.delete(taskId);
-      resolve({ code, signal });
-    });
-  });
-}
-
-function parseRsyncBytes(value: string): number {
-  const match = value.trim().match(/^([\d.,]+)\s*([KMGT])?i?B$/i);
-  if (!match) return 0;
-  const scale: Record<string, number> = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4 };
-  return Math.round(Number(match[1].replace(/,/g, "")) * (scale[(match[2] || "").toUpperCase()] || 1));
-}
-
-function enqueueUploadTask(task: UploadTask): void {
-  const tasks = readUploadTasks();
-  tasks.push(task);
-  writeUploadTasks(tasks);
-  void pumpUploadQueue();
-}
-
-function newUploadTask(dataset: string): UploadTask {
-  return {
-    id: `upl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-    dataset, state: "queued", progress: 0, transferredBytes: 0, attempts: 1,
-    createdAt: new Date().toISOString(), startedAt: null, finishedAt: null,
-    exitCode: null, error: null, logs: [], verifiedAt: null,
-  };
-}
-
-let uploadQueueActive = false;
-
-async function pumpUploadQueue(): Promise<void> {
-  if (uploadQueueActive) return;
-  uploadQueueActive = true;
-  try {
-    for (;;) {
-      const next = readUploadTasks().find((task) => task.state === "queued");
-      if (!next) break;
-      await runUploadTask(next);
-    }
-  } finally {
-    uploadQueueActive = false;
-  }
-}
-
-async function runUploadTask(task: UploadTask): Promise<void> {
-  updateUploadTask(task.id, (current) => {
-    current.state = "running";
-    current.startedAt = new Date().toISOString();
-    current.error = null;
-  });
-  await runRsyncUploadTask(task.id);
-  // 失败自动重试：直接重新入队，attempts 累计，由 pump 循环继续消化。
-  const after = readUploadTasks().find((item) => item.id === task.id);
-  const settings = readUploadSettings();
-  if (after && after.state === "failed" && after.attempts <= settings.retries) {
-    updateUploadTask(task.id, (current) => {
-      current.state = "queued";
-      current.attempts += 1;
-      current.logs = [...current.logs, `准备第 ${current.attempts} 次尝试…`].slice(-300);
-    });
-  }
-}
-
-async function runRsyncUploadTask(id: string): Promise<void> {
-  const task = readUploadTasks().find((item) => item.id === id);
-  if (!task) return;
-  const settings = readUploadSettings();
-  if (!settings.host || (settings.method === "ssh" && !settings.user)) {
-    failUploadTask(id, "尚未配置训练主机，请先在上传设置中填写");
-    return;
-  }
-  let root: string;
-  try {
-    root = fs.realpathSync(datasetPath(task.dataset));
-  } catch {
-    failUploadTask(id, `找不到数据集 ${task.dataset}`);
-    return;
-  }
-  const destination = uploadDestination(settings, task.dataset);
-  const progressPattern = /(\d+(?:\.\d+)?)%\s+([\d.,]+\s*[KMGT]?i?B)/;
-  const { code, signal } = await runLoggedProcess(id, id, "rsync", [
-    "-a", "--partial", "--exclude", ".lerobot-web", ...rsyncTransportArgs(settings), "--info=progress2", `${root}/`, destination,
-  ], (line) => {
-    const runtime = getUploadRuntime(id);
-    const match = line.match(progressPattern);
-    if (!match) return false;
-    runtime.progress = Math.max(runtime.progress, Math.min(99, Math.floor(Number(match[1]))));
-    runtime.transferredBytes = Math.max(runtime.transferredBytes, parseRsyncBytes(match[2]));
-    return true;
-  });
-  if (code !== 0) {
-    updateUploadTask(id, (current) => { current.exitCode = code; });
-    failUploadTask(id, signal ? `上传进程被 ${signal} 终止` : `rsync 退出码 ${code}`);
-    return;
-  }
-  // 复核：dry-run 后增量必须为 0，才认为远端数据完整。
-  let verifyResidual = -1;
-  const verify = await runLoggedProcess(`${id}:verify`, id, "rsync", [
-    "-a", "-n", "--stats", "--exclude", ".lerobot-web", ...rsyncTransportArgs(settings), `${root}/`, destination,
-  ], (line) => {
-    const match = line.match(/Number of files transferred:\s*(\d+)/i);
-    if (match) verifyResidual = Number(match[1]);
-  });
-  if (verifyResidual > 0) {
-    failUploadTask(id, `上传后复核发现 ${verifyResidual} 个文件仍不一致`);
-    return;
-  }
-  if (verify.code !== 0) {
-    failUploadTask(id, `上传完成但复核失败（rsync 退出码 ${verify.code}），请检查训练主机连接后重试`);
-    return;
-  }
-  updateUploadTask(id, (current) => {
-    current.state = "success";
-    current.progress = 100;
-    current.exitCode = 0;
-    current.finishedAt = new Date().toISOString();
-    current.verifiedAt = verifyResidual === 0 ? new Date().toISOString() : null;
-    current.logs = [...current.logs, verifyResidual === 0
-      ? `上传完成并通过复核 → ${destination}`
-      : `上传完成（复核未能解析增量统计，请人工确认）→ ${destination}`].slice(-300);
-  });
-  persistRuntimeLog("system", "info", `数据集 ${task.dataset} 已上传到训练主机 ${destination}`);
-}
-
-function activeUploadTaskFor(dataset: string): UploadTask | undefined {
-  return readUploadTasks().find((task) =>
-    (task.state === "queued" || task.state === "running") && task.dataset === dataset);
-}
-
-function queueDatasetUpload(dataset: string, actor: string): UploadTask {
-  const task = newUploadTask(dataset);
-  enqueueUploadTask(task);
-  const root = datasetPath(dataset);
-  if (fs.existsSync(root)) appendAudit(root, { action: "dataset.upload.enqueue", actor, dataset });
-  return task;
-}
-
-function publicUploadKey(): string | null {
-  // 只有存在配对私钥时公钥才有意义，否则提示用户先生成密钥。
-  for (const base of ["id_ed25519", "id_rsa"]) {
-    try {
-      if (!fs.existsSync(path.join(os.homedir(), ".ssh", base))) continue;
-      return fs.readFileSync(path.join(os.homedir(), ".ssh", `${base}.pub`), "utf-8").trim();
-    } catch { /* try next */ }
-  }
-  return null;
-}
-
-app.get("/api/upload/settings", (_req, res) => {
-  res.json({
-    ok: true,
-    settings: readUploadSettings(),
-    publicKey: publicUploadKey(),
-    taskCount: readUploadTasks().length,
-  });
-});
-
-app.put("/api/upload/settings", (req, res) => {
-  const result = validateUploadSettings((req.body || {}) as Record<string, unknown>);
-  if (result.error || !result.settings) {
-    res.status(400).json({ ok: false, error: result.error || "上传设置无效" });
-    return;
-  }
-  writeUploadSettings(result.settings);
-  res.json({ ok: true, settings: result.settings });
-});
-
-app.post("/api/upload/check", (_req, res) => {
-  const settings = readUploadSettings();
-  if (settings.method === "rsyncd") {
-    if (!settings.host) { res.status(400).json({ ok: false, error: "请先配置训练主机地址" }); return; }
-    execFile("rsync", ["--list-only", "--timeout=8", `rsync://${settings.host}:${settings.port}/`], { timeout: 15000 }, (error, stdout, stderr) => {
-      if (error) {
-        res.status(502).json({ ok: false, error: `无法连接 rsync 守护进程：${describeSshFailure(stderr || error.message)}` });
-        return;
-      }
-      const modules = stdout.split(/\s+/).filter(Boolean);
-      const found = modules.includes(settings.module);
-      res.json({
-        ok: found,
-        error: found ? null : `守护进程已连通，但训练主机 rsyncd 配置里没有模块 ${settings.module}`,
-        rsyncInstalled: true,
-        writable: found,
-        modules,
-        detail: stdout.trim(),
-      });
-    });
-    return;
-  }
-  if (!settings.host || !settings.user) {
-    res.status(400).json({ ok: false, error: "请先配置训练主机地址和用户名" });
-    return;
-  }
-  const remoteCommand = `command -v rsync >/dev/null || echo NO-RSYNC; mkdir -p ${settings.remoteRoot} && test -w ${settings.remoteRoot} && echo WRITABLE; df -Pm ${settings.remoteRoot} 2>/dev/null | tail -1`;
-  execFile("ssh", [
-    "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-p", String(settings.port), `${settings.user}@${settings.host}`, remoteCommand,
-  ], { timeout: 20000 }, (error, stdout, stderr) => {
-    if (error) {
-      res.status(502).json({ ok: false, error: describeSshFailure(stderr || error.message) });
-      return;
-    }
-    const output = stdout.trim();
-    const freeMb = Number((output.match(/\s(\d+)\s+\d+%/) || [])[1] || 0);
-    res.json({
-      ok: !output.includes("NO-RSYNC") && output.includes("WRITABLE"),
-      error: output.includes("NO-RSYNC") ? "训练主机缺少 rsync，请先安装" : output.includes("WRITABLE") ? null : "远端目录不可写",
-      rsyncInstalled: !output.includes("NO-RSYNC"),
-      writable: output.includes("WRITABLE"),
-      freeDiskMb: freeMb || null,
-      detail: output,
-    });
-  });
-});
-
-app.get("/api/upload/tasks", (_req, res) => {
-  let changed = false;
-  const tasks = readUploadTasks().map((task) => {
-    if (task.state === "running" && !uploadProcesses.has(task.id) && !uploadRuntime.has(task.id)) {
-      changed = true;
-      return { ...task, state: "failed" as UploadTaskState, error: "服务重启导致任务中断", finishedAt: new Date().toISOString() };
-    }
-    return task;
-  });
-  if (changed) writeUploadTasks(tasks);
-  res.json({ ok: true, tasks: tasks.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) });
-});
-
-app.post("/api/datasets/:dataset/upload", (req, res) => {
-  const dataset = cleanDatasetName(req.params.dataset);
-  if (!dataset) { res.status(400).json({ ok: false, error: "无效的数据集名称" }); return; }
-  const settings = readUploadSettings();
-  if (!settings.host || (settings.method === "ssh" && !settings.user)) {
-    res.status(400).json({ ok: false, error: "尚未配置训练主机，请先在上传设置中填写并保存" });
-    return;
-  }
-  const root = datasetPath(dataset);
-  if (!fs.existsSync(root)) { res.status(404).json({ ok: false, error: `找不到数据集 ${dataset}` }); return; }
-  if (recordingStatus.dataset === dataset && recordingStatus.state !== "idle" && recordingStatus.state !== "error") {
-    res.status(409).json({ ok: false, error: "该数据集正在录制，请先停止录制再上传" });
-    return;
-  }
-  if (activeUploadTaskFor(dataset)) {
-    res.status(409).json({ ok: false, error: `${dataset} 已有排队或进行中的任务` });
-    return;
-  }
-  const actor = cleanShortText((req as express.Request & { authUser?: AuthUser }).authUser?.name, 80) || "本地用户";
-  const task = queueDatasetUpload(dataset, actor);
-  res.status(202).json({ ok: true, task });
-});
-
-app.post("/api/upload/tasks/:id/retry", (req, res) => {
-  const task = readUploadTasks().find((item) => item.id === req.params.id);
-  if (!task) { res.status(404).json({ ok: false, error: "找不到任务" }); return; }
-  if (task.state !== "failed") { res.status(409).json({ ok: false, error: "只有失败的任务可以重试" }); return; }
-  updateUploadTask(task.id, (current) => {
-    current.state = "queued";
-    current.attempts += 1;
-    current.error = null;
-    current.logs = [...current.logs, "手动重试：重新入队"].slice(-300);
-  });
-  void pumpUploadQueue();
-  res.status(202).json({ ok: true, task: readUploadTasks().find((item) => item.id === task.id) });
-});
-
-// 服务重启后继续消化队列里未完成的任务。
-setTimeout(() => { void pumpUploadQueue(); }, 3000).unref();
-
 // Training and model deployment were removed from this data-collection platform.
 // Keep the legacy implementation below unreachable so old clients fail clearly
 // instead of starting a training or evaluation process.
@@ -3953,8 +3536,9 @@ app.post("/api/recording/start", (req, res) => {
   const dataset = cleanDatasetName(req.body.dataset);
   const task = typeof req.body.task === "string" ? req.body.task.trim() : "";
   const plannedEpisodes = Number(req.body.plannedEpisodes ?? 1);
-  const episodeTime = Number(req.body.episodeTime ?? 20);
-  const resetTime = Number(req.body.resetTime ?? 0);
+  const requestedEpisodeTime = Number(req.body.episodeTime ?? 20);
+  const episodeTime = Number.isInteger(requestedEpisodeTime) && requestedEpisodeTime > 0 ? requestedEpisodeTime : 20;
+  const continuous = req.body.continuous === true;
   const resume = true;
   if (!dataset) {
     res.status(400).json({ ok: false, error: "数据集名称仅支持字母、数字、点、下划线和连字符（最多 64 字符）" });
@@ -3964,8 +3548,8 @@ app.post("/api/recording/start", (req, res) => {
     res.status(400).json({ ok: false, error: "任务描述不能为空且不能超过 200 字符" });
     return;
   }
-  if (!Number.isInteger(plannedEpisodes) || plannedEpisodes < 1 || plannedEpisodes > 10000 || !Number.isInteger(episodeTime) || episodeTime < 1 || episodeTime > 3600 || !Number.isInteger(resetTime) || resetTime < 0 || resetTime > 3600) {
-    res.status(400).json({ ok: false, error: "计划组数、单轮时长或复位时间无效" });
+  if (!Number.isInteger(plannedEpisodes) || plannedEpisodes < 1 || plannedEpisodes > 1000 || (!continuous && (!Number.isInteger(requestedEpisodeTime) || requestedEpisodeTime < 1 || requestedEpisodeTime > 3600))) {
+    res.status(400).json({ ok: false, error: "计划轮数或单轮时长无效" });
     return;
   }
   const now = Date.now();
@@ -4001,56 +3585,21 @@ app.post("/api/recording/start", (req, res) => {
     const match = /^episode_(\d+)$/.exec(name);
     return match ? Math.max(max, parseInt(match[1], 10) + 1) : max;
   }, 0);
-  const episodeDir = path.join(datasetDir, `episode_${String(nextIndex).padStart(4, "0")}`);
-  const sidecarPath = `${episodeDir}.json`;
-  fs.mkdirSync(datasetDir, { recursive: true });
-  fs.writeFileSync(sidecarPath, JSON.stringify({
-    dataset, task, robotType: "so101_follower", episode: nextIndex, startedAt: now, endedAt: null,
-  }, null, 2));
-
-  const startedRecorder = new BagRecorderProcess(episodeDir, BAG_RECORD_TOPICS);
-  startedRecorder.on("log", ({ level, message }: { level: "info" | "warn" | "error"; message: string }) => {
-    persistRuntimeLog("recorder", level, message);
-    broadcastControl({ type: "bridge_log", source: "recorder", level, message });
-  });
-  recorder = startedRecorder;
-  recordingEpisodeDir = episodeDir;
-  recordingSidecarPath = sidecarPath;
-  recordingStopInFlight = false;
+  const session: RecordingSession = {
+    dataset, task, nextEpisode: nextIndex, completedEpisodes: 0,
+    plannedEpisodes, episodeTime, continuous, active: true,
+  };
+  recordingSession = session;
   recordingStatus = {
     state: "preparing", dataset, task, startedAt: null,
-    episode: nextIndex, path: episodeDir, error: null, plannedEpisodes, episodeTime, resetTime, resume,
-    lastResult: null,
+    episode: nextIndex, path: null, error: null, plannedEpisodes,
+    completedEpisodes: 0, episodeTime, continuous,
+    resume, lastResult: null,
   };
-
-  startedRecorder.on("ready", () => {
-    if (recorder !== startedRecorder) return;
-    recordingStatus = { ...recordingStatus, state: "recording", startedAt: Date.now() };
-    publishRecordingStatus();
-    clearRecordingAutoStopTimer();
-    recordingAutoStopTimer = setTimeout(() => requestRecordingSave(), episodeTime * 1000).unref();
-  });
-  startedRecorder.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-    if (recorder !== startedRecorder || recordingStopInFlight) return;
-    recorder = null;
-    clearRecordingAutoStopTimer();
-    if (recordingIsActive()) {
-      recordingStatus = {
-        ...recordingStatus,
-        state: "error",
-        error: recordingStatus.error || `录制进程意外退出 (code=${code ?? "null"}, signal=${signal ?? "null"})`,
-      };
-      publishRecordingStatus();
-    }
-  });
-  startedRecorder.on("error", (error: Error) => {
-    if (recorder !== startedRecorder) return;
-    clearRecordingAutoStopTimer();
-    recordingStatus = { ...recordingStatus, state: "error", error: error.message };
-    publishRecordingStatus();
-  });
-  startedRecorder.start();
-  publishRecordingStatus();
+  if (!startRecordingEpisode(session)) {
+    res.status(409).json({ ok: false, error: recordingStatus.error || "无法启动录制" });
+    return;
+  }
   res.json({ ok: true, ...recordingStatus });
 });
 
@@ -4065,6 +3614,38 @@ app.post("/api/recording/stop", (req, res) => {
 app.post("/api/recording/cancel", (req, res) => {
   if (!requestRecordingCancel()) {
     res.status(409).json({ ok: false, error: "当前没有可取消的录制任务" });
+    return;
+  }
+  res.json({ ok: true, ...recordingStatus });
+});
+
+app.post("/api/recording/next", (req, res) => {
+  if (!recordingSession?.active || !requestRecordingSave(true)) {
+    res.status(409).json({ ok: false, error: "当前没有可结束并进入下一轮的录制" });
+    return;
+  }
+  res.json({ ok: true, ...recordingStatus });
+});
+
+app.post("/api/recording/begin", (req, res) => {
+  if (!requestRecordingBeginNext()) {
+    res.status(409).json({ ok: false, error: "当前还不能开始下一轮，请等待复位完成" });
+    return;
+  }
+  res.json({ ok: true, ...recordingStatus });
+});
+
+app.post("/api/recording/retry", (req, res) => {
+  if (!requestRecordingRetry()) {
+    res.status(409).json({ ok: false, error: "当前没有可重录的轮次" });
+    return;
+  }
+  res.json({ ok: true, ...recordingStatus });
+});
+
+app.post("/api/recording/finish", (req, res) => {
+  if (!requestRecordingFinish()) {
+    res.status(409).json({ ok: false, error: "当前没有可结束的录制任务" });
     return;
   }
   res.json({ ok: true, ...recordingStatus });
@@ -4758,7 +4339,6 @@ function shutdown(): void {
   if (recorder) recorder.stop();
   for (const child of trainingProcesses.values()) child.kill("SIGTERM");
   for (const child of evaluationProcesses.values()) child.kill("SIGTERM");
-  for (const child of uploadProcesses.values()) child.kill("SIGTERM");
   if (controlDisconnectTimer) clearTimeout(controlDisconnectTimer);
   for (const client of clients) client.close();
   controlClientUsers.clear();

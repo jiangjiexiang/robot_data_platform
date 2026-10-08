@@ -1,10 +1,10 @@
 {
   "common": {
-    "appName": "LeRobot Studio",
-    "companyWebsite": "https://io-ai.tech/",
-    "companyName": "IO-AI.TECH",
-    "githubUrl": "https://github.com/ioai-tech/lerobot-studio",
-    "browseLeRobot": "LeRobot を開く",
+    "appName": "ロボットアーム・データプラットフォーム",
+    "companyWebsite": "https://github.com/jiangjiexiang/robot_data_platform",
+    "companyName": "ロボットアーム・データプラットフォーム",
+    "githubUrl": "https://github.com/jiangjiexiang/robot_data_platform",
+    "browseLeRobot": "サンプルを閲覧",
     "of": "/",
     "copy": "コピー",
     "copied": "コピーしました",
@@ -666,19 +666,19 @@
       "dropToOpen": "LeRobot データセットを開くにはここにドロップ",
       "dropHint": "ローカルフォルダまたはアーカイブ（.zip, .tar, .tar.gz）に対応",
       "dropDirectoryUnsupported": "このブラウザでは「{{name}}」をフォルダとして読み取れません。ローカルディレクトリを開くか、.zip/.tar に圧縮してからドロップしてください。",
-      "attribution": "{{company}} が開発・オープンソース化"
+      "attribution": "{{company}}"
     }
   },
   "app": {
-    "title": "LeRobot Studio - データ可視化",
+    "title": "ロボットアーム・データプラットフォーム - データ可視化",
     "enterRemoteArchiveUrl": "リモートアーカイブ URL を入力"
   },
   "seo": {
-    "title": "LeRobot Visualizer - LeRobot Studio",
-    "description": "LeRobot Visualizer は IO-AI.TECH が提供する LeRobot データ可視化ツールです。ブラウザ上で動画、グラフ、Raw 特徴量を同期表示できます。",
-    "keywords": "lerobot visualizer, lerobot dataset visualizer, ロボットデータセット 可視化, lerobot studio, robotics data visualization",
-    "ogTitle": "LeRobot Visualizer - LeRobot Studio",
-    "ogDescription": "LeRobot データセットを動画・グラフ・Raw 特徴量で同期可視化。"
+    "title": "ロボットアーム・データプラットフォーム - データセット可視化",
+    "description": "ロボットアーム・データプラットフォームのデータセット可視化ツール。動画・グラフ・Raw 特徴量をブラウザで同期表示できます。",
+    "keywords": "lerobot dataset visualizer, ロボットデータセット 可視化, robot dataset viewer, ロボットアーム・データプラットフォーム, robotics data visualization",
+    "ogTitle": "ロボットアーム・データプラットフォーム - データセット可視化",
+    "ogDescription": "データセットを動画・グラフ・Raw 特徴量で同期可視化。"
   },
   "navbar": {
     "github": "オープンソースプロジェクトを見る",

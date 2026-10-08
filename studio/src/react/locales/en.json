@@ -1,10 +1,10 @@
 {
   "common": {
-    "appName": "LeRobot Studio",
-    "companyWebsite": "https://io-ai.tech/",
-    "companyName": "IO-AI.TECH",
-    "githubUrl": "https://github.com/ioai-tech/lerobot-studio",
-    "browseLeRobot": "Browse LeRobot",
+    "appName": "Robot Arm Data Platform",
+    "companyWebsite": "https://github.com/jiangjiexiang/robot_data_platform",
+    "companyName": "Robot Arm Data Platform",
+    "githubUrl": "https://github.com/jiangjiexiang/robot_data_platform",
+    "browseLeRobot": "Browse samples",
     "of": "of",
     "copy": "Copy",
     "copied": "Copied",
@@ -664,19 +664,19 @@
       "dropToOpen": "Drop to open LeRobot dataset",
       "dropHint": "Supports local folders or archives (.zip, .tar, .tar.gz)",
       "dropDirectoryUnsupported": "This browser could not read \"{{name}}\" as a folder. Use Open local directory or drop a .zip/.tar archive instead.",
-      "attribution": "Built and open-sourced by {{company}}"
+      "attribution": "{{company}}"
     }
   },
   "app": {
-    "title": "LeRobot Studio - Data Visualization",
+    "title": "Robot Arm Data Platform - Data Visualization",
     "enterRemoteArchiveUrl": "Enter remote archive URL"
   },
   "seo": {
-    "title": "LeRobot Visualizer - LeRobot Studio",
-    "description": "LeRobot Visualizer by LeRobot Studio helps you inspect and analyze LeRobot datasets in your browser with synced video, charts, and raw features.",
-    "keywords": "lerobot visualizer, lerobot dataset visualizer, robot dataset viewer, lerobot studio, robotics data visualization",
-    "ogTitle": "LeRobot Visualizer - LeRobot Studio",
-    "ogDescription": "Visualize LeRobot datasets with synced video, chart playback, and raw feature panels."
+    "title": "Robot Arm Data Platform - Dataset Visualization",
+    "description": "Dataset visualizer for the Robot Arm Data Platform. Inspect datasets in your browser with synced video, charts, and raw features.",
+    "keywords": "lerobot dataset visualizer, robot dataset viewer, robot arm data platform, robotics data visualization",
+    "ogTitle": "Robot Arm Data Platform - Dataset Visualization",
+    "ogDescription": "Visualize datasets with synced video, chart playback, and raw feature panels."
   },
   "navbar": {
     "github": "View open-source project",

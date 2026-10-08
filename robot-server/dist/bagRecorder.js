@@ -1,8 +1,12 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.BagRecorderProcess = void 0;
 const child_process_1 = require("child_process");
 const events_1 = require("events");
+const fs_1 = __importDefault(require("fs"));
 /**
  * BagRecorderProcess - 管理 `ros2 bag record` 子进程。
  * 与 RobotBridge 不同，rosbag2 没有 stdin JSON 协议，只能靠信号控制生命周期：
@@ -17,9 +21,49 @@ class BagRecorderProcess extends events_1.EventEmitter {
         this.outputBuffer = "";
         this.readyEmitted = false;
         this.readyTimer = null;
+        this.qosOverridesPath = null;
+        this.storageConfigPath = null;
     }
     start() {
-        const args = ["bag", "record", "-o", this.outputDir, "-s", "mcap", ...this.topics];
+        const configuredCacheSize = Number(process.env.ROSBAG_MAX_CACHE_SIZE);
+        const cacheSize = Number.isSafeInteger(configuredCacheSize) && configuredCacheSize > 0
+            ? configuredCacheSize
+            : 256 * 1024 * 1024;
+        this.qosOverridesPath = `${this.outputDir}.qos.yaml`;
+        fs_1.default.writeFileSync(this.qosOverridesPath, [
+            "/camera1/image_raw:",
+            "  history: keep_last",
+            "  depth: 30",
+            "  reliability: best_effort",
+            "  durability: volatile",
+            "/camera2/image_raw:",
+            "  history: keep_last",
+            "  depth: 30",
+            "  reliability: best_effort",
+            "  durability: volatile",
+            "",
+        ].join("\n"));
+        this.storageConfigPath = `${this.outputDir}.mcap.yaml`;
+        fs_1.default.writeFileSync(this.storageConfigPath, [
+            "noChunking: false",
+            "noChunkCRC: false",
+            "noMessageIndex: false",
+            "noSummary: false",
+            "chunkSize: 16777216",
+            'compression: "None"',
+            "",
+        ].join("\n"));
+        const args = [
+            "bag", "record", "-o", this.outputDir, "-s", "mcap",
+            "--storage-config-file", this.storageConfigPath,
+            "--max-cache-size", String(cacheSize),
+            "--qos-profile-overrides-path", this.qosOverridesPath,
+            ...this.topics,
+        ];
+        this.emit("log", {
+            level: "info",
+            message: `rosbag2 参数：MCAP 16 MiB 分块、保留索引和校验、无压缩，缓存 ${(cacheSize / 1024 / 1024).toFixed(0)} MiB，相机 QoS best_effort/depth=30，录制话题 ${this.topics.join(", ")}`,
+        });
         this.process = (0, child_process_1.spawn)("ros2", args, {
             stdio: ["ignore", "pipe", "pipe"],
             env: { ...process.env },
@@ -36,9 +80,15 @@ class BagRecorderProcess extends events_1.EventEmitter {
             if (this.outputBuffer.trim())
                 this.handleLine(this.outputBuffer);
             this.outputBuffer = "";
+            this.cleanupQosOverrides();
             this.emit("exit", code, signal);
         });
         this.process.on("error", (err) => {
+            if (this.readyTimer) {
+                clearTimeout(this.readyTimer);
+                this.readyTimer = null;
+            }
+            this.cleanupQosOverrides();
             this.emit("error", err);
         });
     }
@@ -66,6 +116,18 @@ class BagRecorderProcess extends events_1.EventEmitter {
     }
     getOutputDir() {
         return this.outputDir;
+    }
+    cleanupQosOverrides() {
+        for (const file of [this.qosOverridesPath, this.storageConfigPath]) {
+            if (file) {
+                try {
+                    fs_1.default.unlinkSync(file);
+                }
+                catch { /* best effort */ }
+            }
+        }
+        this.qosOverridesPath = null;
+        this.storageConfigPath = null;
     }
     handleOutputChunk(data) {
         this.outputBuffer += data.toString();

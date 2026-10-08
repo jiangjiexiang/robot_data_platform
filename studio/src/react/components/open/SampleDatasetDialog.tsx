@@ -5,7 +5,6 @@ import { ScrollArea } from '@/ui';
 import { Button } from '@/ui';
 import type { SampleDataset } from '@/platform';
 import { SampleDatasetList } from './SampleDatasetList';
-import { ArrowUpRightIcon } from 'lucide-react';
 
 interface SampleDatasetDialogProps {
   open: boolean;
@@ -53,15 +52,6 @@ export const SampleDatasetDialog: React.FC<SampleDatasetDialogProps> = ({
               <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
                 {t('common.close')}
               </Button>
-              <a
-                href="https://huggingface.co/lerobot/datasets"
-                target="_blank"
-                rel="noreferrer"
-                className="text-[12px] text-primary underline flex items-center gap-1"
-              >
-                {t('dialogs.samples.openDirect')}
-                <ArrowUpRightIcon className="w-4 h-4" />
-              </a>
             </div>
           </ScrollArea>
         </div>

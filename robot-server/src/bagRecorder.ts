@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
+import fs from "fs";
 
 /**
  * BagRecorderProcess - 管理 `ros2 bag record` 子进程。
@@ -11,13 +12,53 @@ export class BagRecorderProcess extends EventEmitter {
   private outputBuffer = "";
   private readyEmitted = false;
   private readyTimer: NodeJS.Timeout | null = null;
+  private qosOverridesPath: string | null = null;
+  private storageConfigPath: string | null = null;
 
   constructor(private readonly outputDir: string, private readonly topics: string[]) {
     super();
   }
 
   start(): void {
-    const args = ["bag", "record", "-o", this.outputDir, "-s", "mcap", ...this.topics];
+    const configuredCacheSize = Number(process.env.ROSBAG_MAX_CACHE_SIZE);
+    const cacheSize = Number.isSafeInteger(configuredCacheSize) && configuredCacheSize > 0
+      ? configuredCacheSize
+      : 256 * 1024 * 1024;
+    this.qosOverridesPath = `${this.outputDir}.qos.yaml`;
+    fs.writeFileSync(this.qosOverridesPath, [
+      "/camera1/image_raw:",
+      "  history: keep_last",
+      "  depth: 30",
+      "  reliability: best_effort",
+      "  durability: volatile",
+      "/camera2/image_raw:",
+      "  history: keep_last",
+      "  depth: 30",
+      "  reliability: best_effort",
+      "  durability: volatile",
+      "",
+    ].join("\n"));
+    this.storageConfigPath = `${this.outputDir}.mcap.yaml`;
+    fs.writeFileSync(this.storageConfigPath, [
+      "noChunking: false",
+      "noChunkCRC: false",
+      "noMessageIndex: false",
+      "noSummary: false",
+      "chunkSize: 16777216",
+      'compression: "None"',
+      "",
+    ].join("\n"));
+    const args = [
+      "bag", "record", "-o", this.outputDir, "-s", "mcap",
+      "--storage-config-file", this.storageConfigPath,
+      "--max-cache-size", String(cacheSize),
+      "--qos-profile-overrides-path", this.qosOverridesPath,
+      ...this.topics,
+    ];
+    this.emit("log", {
+      level: "info",
+      message: `rosbag2 参数：MCAP 16 MiB 分块、保留索引和校验、无压缩，缓存 ${(cacheSize / 1024 / 1024).toFixed(0)} MiB，相机 QoS best_effort/depth=30，录制话题 ${this.topics.join(", ")}`,
+    });
     this.process = spawn("ros2", args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env },
@@ -36,10 +77,16 @@ export class BagRecorderProcess extends EventEmitter {
       }
       if (this.outputBuffer.trim()) this.handleLine(this.outputBuffer);
       this.outputBuffer = "";
+      this.cleanupQosOverrides();
       this.emit("exit", code, signal);
     });
 
     this.process.on("error", (err) => {
+      if (this.readyTimer) {
+        clearTimeout(this.readyTimer);
+        this.readyTimer = null;
+      }
+      this.cleanupQosOverrides();
       this.emit("error", err);
     });
   }
@@ -69,6 +116,16 @@ export class BagRecorderProcess extends EventEmitter {
 
   getOutputDir(): string {
     return this.outputDir;
+  }
+
+  private cleanupQosOverrides(): void {
+    for (const file of [this.qosOverridesPath, this.storageConfigPath]) {
+      if (file) {
+        try { fs.unlinkSync(file); } catch { /* best effort */ }
+      }
+    }
+    this.qosOverridesPath = null;
+    this.storageConfigPath = null;
   }
 
   private handleOutputChunk(data: Buffer): void {

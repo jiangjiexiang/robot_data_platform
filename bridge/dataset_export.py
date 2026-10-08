@@ -3,7 +3,7 @@
 
 新数据集是完整的数据副本：拥有自己的 meta/info.json、meta/episodes、
 meta/tasks、meta/stats.json、data parquet 和按 Episode 重新拼接的相机视频，
-可以直接被数据管理浏览、质量扫描和上传训练主机。
+可以直接被数据管理浏览、质量扫描和后续训练流程使用。
 
 用法:
 
@@ -274,10 +274,18 @@ def export(root: Path, source_name: str, target_name: str, requested: list[int])
         source_tasks = source / "meta" / "tasks.parquet"
         if source_tasks.is_file():
             tasks = pq.read_table(source_tasks)
-            keep = [old for old, _ in sorted(used_tasks.items(), key=lambda item: item[1])]
-            rows = [row for row in tasks.to_pylist() if int(row.get("task_index", -1)) in keep] if "task_index" in tasks.schema.names else []
+            task_rows = {
+                int(row.get("task_index", -1)): row
+                for row in tasks.to_pylist()
+                if "task_index" in tasks.schema.names
+            }
+            rows = [
+                {**task_rows[old], "task_index": new}
+                for old, new in sorted(used_tasks.items(), key=lambda item: item[1])
+                if old in task_rows
+            ]
             rebuilt = pa.Table.from_pylist(
-                [{**row, "task_index": index} for index, row in enumerate(rows)] if rows else [],
+                rows,
                 schema=tasks.schema,
             )
             pq.write_table(rebuilt, meta_directory / "tasks.parquet")

@@ -39,12 +39,15 @@
             <el-menu-item index="control"><el-icon><DataLine /></el-icon>概览</el-menu-item>
             <el-menu-item index="motors"><el-icon><Operation /></el-icon>机械臂</el-menu-item>
             <el-menu-item index="datasets"><el-icon><Files /></el-icon>数据</el-menu-item>
-            <el-menu-item index="upload"><el-icon><Upload /></el-icon>上传训练主机</el-menu-item>
-            <el-menu-item index="clip"><el-icon><Scissor /></el-icon>裁剪数据</el-menu-item>
+            <el-menu-item v-if="authUser?.role === 'admin'" index="users"><el-icon><User /></el-icon>账号管理</el-menu-item>
           </el-menu>
         </nav>
         <div class="topbar-status"><StatusBar v-if="workspace === 'control'" :connected="connected" :running="running" :metrics="metrics" /></div>
-        <div class="account-actions"><el-button class="emergency-header" :disabled="emergencyReleasePending || emergencyReleased" title="立即停止遥操作并释放机械臂电机扭矩" @click="handleEmergencyRelease"><el-icon><WarningFilled /></el-icon><span>{{ emergencyReleasePending ? "正在释放力..." : emergencyReleased ? "已释放力" : "紧急停止并释放力" }}</span></el-button><el-button class="account-avatar" circle text :title="`${authUser?.name || authUser?.email || '用户'}，点击退出`" aria-label="退出登录" @click="handleLogout"><el-icon><User /></el-icon></el-button></div>
+        <div class="account-actions">
+          <el-button class="emergency-header" :disabled="emergencyReleasePending || emergencyReleased" title="立即停止遥操作并释放机械臂电机扭矩" aria-label="紧急停止并释放力" @click="handleEmergencyRelease"><el-icon><WarningFilled /></el-icon><span>{{ emergencyReleasePending ? "正在释放力..." : emergencyReleased ? "已释放力" : "紧急停止并释放力" }}</span></el-button>
+          <span class="account-identity" :title="authUser?.email || '已登录用户'"><el-icon><User /></el-icon><span>{{ authUser?.name || authUser?.email || "用户" }}</span><small>{{ authUser?.role === "admin" ? "管理员" : authUser?.role === "operator" ? "操作员" : "查看者" }}</small></span>
+          <el-button class="logout-button" text @click="handleLogout">退出</el-button>
+        </div>
       </header>
 
       <main v-if="workspace === 'control'" class="main">
@@ -72,7 +75,7 @@
           </section>
         </section>
         <aside class="right-rail" aria-label="采集控制">
-          <section class="panel recorder" aria-label="数据录制"><RecordingPanel :recording="recording" :running="running" :busy="recordingPending" @start="handleRecordingStart" @stop="handleRecordingStop" @cancel="handleRecordingCancel" /></section>
+          <section class="panel recorder" aria-label="数据录制"><RecordingPanel :recording="recording" :running="running" :busy="recordingPending" @start="handleRecordingStart" @next="handleRecordingNext" @begin="handleRecordingBegin" @retry="handleRecordingRetry" @finish="handleRecordingFinish" @cancel="handleRecordingCancel" /></section>
           <section class="panel ctrl" aria-label="机械臂连接"><ControlPanel :ports="ports" :detected-cameras="detectedCameras" :active-cameras="activeCameras" :camera-switchable="cameraSwitchable" :running="running" :busy="actionPending" :serial-connected="serialConnected" :serial-error="serialError" :control-latency="metrics.controlLatency" @refresh="fetchPorts" @start="handleStart" @stop="handleStop" @switch-camera="handleSwitchCamera" @swap-camera-views="handleSwapCameraViews" @connect-leader="handleConnectLeader" @disconnect-leader="disconnectLeader" /></section>
         </aside>
       </main>
@@ -111,8 +114,6 @@
       <div v-else-if="workspace === 'datasets'" class="route-view">
         <DatasetWorkspace />
       </div>
-      <UploadWorkspace v-else-if="workspace === 'upload'" />
-      <ClipWorkspace v-else-if="workspace === 'clip'" :joints="followerJoints" />
       <LogWorkspace v-else-if="workspace === 'logs'" :logs="logs" @clear="clearLogs" />
       <UserManagementWorkspace v-else :current-user="authUser" />
       <footer class="dcp-footer">数据采集平台</footer>
@@ -132,10 +133,8 @@ import LogWorkspace from "./components/LogWorkspace.vue";
 import MotorControlWorkspace from "./components/MotorControlWorkspace.vue";
 import AuthGate from "./components/AuthGate.vue";
 import UserManagementWorkspace from "./components/UserManagementWorkspace.vue";
-import UploadWorkspace from "./components/UploadWorkspace.vue";
-import ClipWorkspace from "./components/ClipWorkspace.vue";
 import { useLeaderSerial } from "./composables/useLeaderSerial";
-import { DataLine, Files, Operation, Scissor, Upload, User, WarningFilled } from "@element-plus/icons-vue";
+import { DataLine, Files, Operation, User, WarningFilled } from "@element-plus/icons-vue";
 
 const authReady = ref(false);
 const authenticated = ref(false);
@@ -209,30 +208,24 @@ const modalError = computed({
   set: (value) => { fatalError.value = value; frontError.value = value; },
 });
 const frontError = ref<string | null>(null);
-type Workspace = "control" | "motors" | "datasets" | "upload" | "clip" | "logs" | "users";
+type Workspace = "control" | "motors" | "datasets" | "logs" | "users";
 const initialWorkspace: Workspace = location.hash === "#datasets" || location.hash.startsWith("#datasets/")
   ? "datasets"
   : location.hash === "#motors"
     ? "motors"
-  : location.hash === "#upload"
-      ? "upload"
-      : location.hash === "#clip"
-        ? "clip"
-    : location.hash === "#logs"
+  : location.hash === "#logs"
       ? "logs"
       : location.hash === "#users"
         ? "users"
       : "control";
 const workspace = ref<Workspace>(initialWorkspace);
 function selectWorkspace(value: string): void {
-  if (["control", "motors", "datasets", "upload", "clip", "logs", "users"].includes(value)) workspace.value = value as Workspace;
+  if (["control", "motors", "datasets", "logs", "users"].includes(value)) workspace.value = value as Workspace;
 }
 const pageContext = computed(() => ({
   control: { title: "遥操作控制台" },
   motors: { title: "电机手动控制" },
   datasets: { title: "数据管理平台" },
-  upload: { title: "上传训练主机" },
-  clip: { title: "裁剪数据" },
   logs: { title: "日志管理" },
   users: { title: "账号管理" },
 })[workspace.value]);
@@ -380,7 +373,7 @@ function handleSwapCameraViews() {
   log("已交换左右摄像头画面");
 }
 
-async function recordingRequest(endpoint: "start" | "stop" | "cancel", body?: object) {
+async function recordingRequest(endpoint: "start" | "stop" | "cancel" | "next" | "begin" | "retry" | "finish", body?: object) {
   if (recordingPending.value) return;
   recordingPending.value = true;
   try {
@@ -391,7 +384,11 @@ async function recordingRequest(endpoint: "start" | "stop" | "cancel", body?: ob
     });
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || `请求失败，状态码 ${res.status}`);
-    log(endpoint === "start" ? "数据集录制已启动" : endpoint === "stop" ? "正在编码并保存当前数据" : "正在丢弃本次录制");
+    const messages: Record<typeof endpoint, string> = {
+      start: "数据采集任务已启动", stop: "正在编码并保存当前数据", cancel: "正在丢弃当前轮并结束任务",
+      next: "正在结束并保存当前轮", begin: "正在开始下一轮录制", retry: "正在丢弃并重录当前轮", finish: "正在结束数据采集任务",
+    };
+    log(messages[endpoint]);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     log(`录制操作失败: ${message}`);
@@ -401,8 +398,11 @@ async function recordingRequest(endpoint: "start" | "stop" | "cancel", body?: ob
   }
 }
 
-function handleRecordingStart(config: { dataset: string; task: string; episodeTime: number }) { void recordingRequest("start", config); }
-function handleRecordingStop() { void recordingRequest("stop"); }
+function handleRecordingStart(config: { dataset: string; task: string; plannedEpisodes: number; episodeTime: number; continuous: boolean }) { void recordingRequest("start", config); }
+function handleRecordingNext() { void recordingRequest("next"); }
+function handleRecordingBegin() { void recordingRequest("begin"); }
+function handleRecordingRetry() { void recordingRequest("retry"); }
+function handleRecordingFinish() { void recordingRequest("finish"); }
 function handleRecordingCancel() { void recordingRequest("cancel"); }
 
 function handleMotorStart() {
@@ -584,7 +584,7 @@ body {
 body { background: #f7f8f8; color: #242629; }
 .app-shell { background: #f7f8f8; }
 .app-layout { display: block; min-height: 100vh; }
-.topbar { height: 68px; display: flex; align-items: center; gap: 28px; padding: 0 34px; color: #e9e9e9; background: #0d0e10; border-bottom: 1px solid #242528; }
+.topbar { height: 68px; width: 100%; min-width: 0; display: flex; align-items: center; gap: 20px; padding: 0 34px; color: #e9e9e9; background: #0d0e10; border-bottom: 1px solid #242528; }
 .workspace-tabs { display:flex; flex-direction:row; align-items:center; gap:2px; background:transparent; border:0; }
 .workspace-tabs button { position:relative; display:inline-flex; align-items:center; gap:6px; width:auto; min-height:38px; padding:8px 11px; border:0; border-radius:0; color:#85878b; background:transparent; font-size:13px; font-weight:550; }
 .workspace-tabs button span { color:#76797d; font-size:15px; line-height:1; }
@@ -597,10 +597,15 @@ body { background: #f7f8f8; color: #242629; }
 .account-actions .emergency-header { min-height: 32px; border-color: #a83b3f; background: #3a1719; color: #ffb5b8; font-weight: 700; }
 .account-actions .emergency-header:hover:not(:disabled) { border-color: #e94b50; background: #5a1d20; color: #fff; }
 .account-actions .emergency-header:disabled { opacity: .55; cursor: not-allowed; }
+.account-identity { display:inline-flex; align-items:center; gap:7px; min-width:0; max-width:190px; color:#e4e5e6; font-size:12px; }
+.account-identity > .el-icon { flex:none; color:#b7bbc0; font-size:16px; }
+.account-identity > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.account-identity small { flex:none; color:#9b9fa4; font-size:10px; }
+.account-actions .logout-button.el-button { min-height:30px; padding:0 10px; border:1px solid #424549; border-radius:6px; color:#d6d8db; }
 .topbar-status .status-bar { gap: 9px; }
 .topbar-status .metrics { display: none; }
 .topbar-status .status-text { color: #c7c9cc; font-size: 12px; }
-.workspace-tabs { flex: 0 0 auto; }.workspace-tabs .el-menu { --el-menu-bg-color: transparent; --el-menu-text-color: #85878b; --el-menu-hover-text-color: #f0f1f2; --el-menu-hover-bg-color: #17191b; --el-menu-active-color: #fff; --el-menu-border-color: transparent; height: 68px; border-bottom: 0; background: transparent; }.workspace-tabs .el-menu-item { height: 68px; gap: 6px; padding: 0 13px; border-bottom: 2px solid transparent; font-size: 13px; }.workspace-tabs .el-menu-item:hover { background:#17191b; }.workspace-tabs .el-menu-item.is-active { border-bottom-color:#fff; background:transparent; }.workspace-tabs .el-icon { margin-right: 2px; color: currentColor; font-size: 16px; }.account-actions .el-button { --el-button-text-color:#e4e5e6; --el-button-hover-text-color:#fff; --el-button-hover-bg-color:#1b1d1f; --el-button-hover-border-color:#74787b; }
+.workspace-tabs { flex: 0 1 auto; min-width: 0; }.workspace-tabs .el-menu { --el-menu-bg-color: transparent; --el-menu-text-color: #a3a6aa; --el-menu-hover-text-color: #f0f1f2; --el-menu-hover-bg-color: #1d1f22; --el-menu-active-color: #fff; --el-menu-border-color: transparent; height: 68px; min-width: max-content; border-bottom: 0; background: transparent; }.workspace-tabs .el-menu-item { height: 68px; gap: 6px; padding: 0 13px; border-bottom: 2px solid transparent; border-radius: 0 !important; font-size: 13px; white-space: nowrap; }.workspace-tabs .el-menu-item:hover { background:#17191b; }.workspace-tabs .el-menu-item.is-active { border-bottom: 2px solid #fff !important; border-radius: 0 !important; background:transparent !important; color:#fff !important; }.workspace-tabs .el-icon { margin-right: 2px; color: currentColor; font-size: 16px; }.account-actions .el-button { --el-button-text-color:#e4e5e6; --el-button-hover-text-color:#fff; --el-button-hover-bg-color:#1b1d1f; --el-button-hover-border-color:#74787b; }
 .main { max-width: 1760px; margin: 0 auto; padding: 30px 40px; display: grid; grid-template-columns: minmax(0, 1fr) 410px; grid-template-areas: "live recorder"; gap: 20px; align-items: start; }
 .live-workspace { grid-area: live; display: grid; gap: 18px; min-width: 0; container-type: inline-size; }
 .right-rail { grid-area: recorder; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
@@ -665,8 +670,11 @@ body { background: #f7f8f8; color: #242629; }
 
 @media (max-width: 680px) {
   .topbar { align-items: center; min-height: 56px; padding: 8px 12px; }
-  .account-actions { margin-left: auto; font-size: 11px; }
-  .account-actions > span { max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+  .account-actions { margin-left: auto; gap:6px; font-size: 11px; }
+  .account-actions .emergency-header { width:34px; min-width:34px; padding:0; }
+  .account-actions .emergency-header > span { display:none; }
+  .account-identity { max-width:120px; gap:5px; }
+  .account-identity small { display:none; }
   .main { padding: 10px; gap: 10px; }
   .live-workspace { gap: 10px; }
   .workspace-heading { min-height: 54px; padding: 11px 12px; }
@@ -682,8 +690,9 @@ body { background: #f7f8f8; color: #242629; }
 
 @media (max-width: 420px) {
   .workspace-tabs { gap: 0; }
-  .workspace-tabs button { min-height: 34px; padding: 6px 8px; }
-  .workspace-tabs button span { display: none; }
+  .workspace-tabs, .workspace-tabs .el-menu { width:100%; overflow-x:auto; }
+  .workspace-tabs .el-menu-item { height:38px; padding:0 10px; font-size:11px; }
+  .account-identity { max-width:80px; }
   .camera-grid { grid-template-columns: 1fr; }
   .camera-view .video-box { width: 100%; }
   .camera-count { display: none; }

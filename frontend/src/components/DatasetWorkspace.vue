@@ -33,7 +33,7 @@
             <div class="reference-card-heading"><div><h3>{{ item.name }}</h3><p>{{ item.robotType || "so101_follower" }}</p></div><span :class="['reference-status', datasetStatusClass(item)]"><i></i>{{ datasetStatusText(item) }}</span></div>
             <div class="reference-card-stats"><div><strong>{{ item.totalEpisodes }}</strong><span>段采集</span></div><div><strong>{{ item.cameras.length }}</strong><span>路相机</span></div><div><strong>{{ datasetQualityScore(item) }}</strong><span>质量分</span></div></div>
             <div class="reference-card-quality"><div class="reference-quality-ring" :style="qualityRingStyle(item)"><span>{{ datasetQualityScore(item) }}</span></div><span>质量评分</span><time>更新于<br /><b>{{ formatDate(item.modifiedAt) }}</b></time></div>
-            <div class="reference-card-footer"><button class="reference-view-button" type="button" @click="openStudio(item)">◉ <span>查看</span></button><button class="reference-delete-button" type="button" :aria-label="`删除 ${item.name}`" @click="openDeleteDataset(item)">⌫</button></div>
+            <div class="reference-card-footer"><button class="reference-view-button" type="button" @click="openStudio(item)">◉ <span>Studio 编辑</span></button><button class="reference-delete-button" type="button" :aria-label="`删除 ${item.name}`" @click="openDeleteDataset(item)">⌫</button></div>
           </article>
         </div>
         <div v-else class="reference-empty"><span>□</span><strong>未找到匹配的数据集</strong><small>请调整搜索词或筛选条件</small></div>
@@ -151,7 +151,7 @@
           <div class="publish-box">
             <label>导出为数据集<input v-model="exportTarget" :placeholder="`${selectedDataset.name}_approved`" /></label>
             <button :disabled="exporting || approvedCount === 0" @click="exportReviewed">{{ exporting ? "导出中…" : "导出已通过片段" }}</button>
-            <p>{{ exportMessage || `把 ${approvedCount} 个已通过片段连同数据和视频复制到一个新数据集，可直接查看、继续审核或上传训练主机。` }}</p>
+            <p>{{ exportMessage || `把 ${approvedCount} 个已通过片段连同数据和视频复制到一个新数据集，可直接查看或继续审核。` }}</p>
           </div>
           <div v-if="collections.length" class="collection-list">
             <article v-for="item in collections" :key="item.id">
@@ -193,10 +193,9 @@
         <span class="danger-mark">!</span>
         <div><p class="eyebrow">危险操作</p><h3 id="delete-title">删除数据集</h3></div>
         <p>数据集 <strong>{{ deleteTarget.name }}</strong> 将从资产库移出。文件会保留在本地回收目录，可由管理员手动恢复。</p>
-        <label>输入数据集名称确认<input v-model="deleteConfirmation" autofocus :placeholder="deleteTarget.name" /></label>
         <div class="confirm-actions">
           <button @click="closeDeleteDialog">取消</button>
-          <button class="confirm-delete" :disabled="deleting || deleteConfirmation !== deleteTarget.name" @click="deleteDataset">{{ deleting ? "正在删除…" : "确认删除" }}</button>
+          <button class="confirm-delete" :disabled="deleting" @click="deleteDataset">{{ deleting ? "正在移入回收目录…" : "移入回收目录" }}</button>
         </div>
       </section>
     </div>
@@ -258,7 +257,6 @@ const exportTarget = ref("");
 const exporting = ref(false);
 const exportMessage = ref("");
 const deleteTarget = ref<DatasetSummary | null>(null);
-const deleteConfirmation = ref("");
 const deleting = ref(false);
 const deletingEpisode = ref(false);
 let syncing = false;
@@ -557,27 +555,24 @@ async function exportReviewed() {
 
 function openDeleteDataset(item: DatasetSummary) {
   deleteTarget.value = item;
-  deleteConfirmation.value = "";
 }
 function closeDeleteDialog() {
   if (deleting.value) return;
   deleteTarget.value = null;
-  deleteConfirmation.value = "";
 }
 async function deleteDataset() {
-  if (!deleteTarget.value || deleteConfirmation.value !== deleteTarget.value.name || deleting.value) return;
+  if (!deleteTarget.value || deleting.value) return;
   deleting.value = true; error.value = null;
   const name = deleteTarget.value.name;
   try {
     await requestJson(`/api/datasets/${encodeURIComponent(name)}`, {
-      method: "DELETE", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirmation: deleteConfirmation.value }),
+      method: "DELETE",
     });
     if (selectedDataset.value?.name === name) closeDataset();
-    closeDeleteDialog();
+    deleteTarget.value = null;
     await loadDatasets(true);
   } catch (cause) { error.value = cause instanceof Error ? cause.message : String(cause); }
-  finally { deleting.value = false; if (deleteTarget.value?.name === name) closeDeleteDialog(); }
+  finally { deleting.value = false; }
 }
 async function deleteEpisode() {
   if (!selectedDataset.value || !selectedEpisode.value || deletingEpisode.value) return;

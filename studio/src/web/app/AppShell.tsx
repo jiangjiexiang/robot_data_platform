@@ -115,14 +115,14 @@ export function AppShell() {
       zh: 'zh_CN',
       ja: 'ja_JP',
     };
-    const seoTitle = t('seo.title', 'LeRobot Visualizer - LeRobot Studio');
+    const seoTitle = t('seo.title', t('common.appName'));
     const seoDescription = t(
       'seo.description',
-      'LeRobot Visualizer by LeRobot Studio helps you inspect and analyze LeRobot datasets in your browser.',
+      'Dataset visualizer for the Robot Arm Data Platform. Inspect datasets in your browser.',
     );
     const seoKeywords = t(
       'seo.keywords',
-      'lerobot visualizer, lerobot dataset visualizer, robot dataset viewer, lerobot studio, robotics data visualization',
+      'lerobot dataset visualizer, robot dataset viewer, robot arm data platform, robotics data visualization',
     );
     const seoOgTitle = t('seo.ogTitle', seoTitle);
     const seoOgDescription = t('seo.ogDescription', seoDescription);
@@ -153,7 +153,7 @@ export function AppShell() {
     updateSeoJsonLd({
       '@context': 'https://schema.org',
       '@type': 'SoftwareApplication',
-      name: 'LeRobot Studio',
+      name: t('common.appName'),
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'Web',
       url: canonical,
@@ -163,8 +163,8 @@ export function AppShell() {
       keywords: seoKeywords,
       creator: {
         '@type': 'Organization',
-        name: 'IO-AI.TECH',
-        url: 'https://io-ai.tech',
+        name: t('common.companyName'),
+        url: t('common.companyWebsite'),
       },
     });
   }, [t, i18n.language]);

@@ -1,7 +1,7 @@
 # 迁移到其他机械臂
 
 本文用于把 `robot_data_platform` 接到新的机械臂型号。平台负责网页、控制传输、
-相机预览、ROS bag、数据审核和裁剪；每种机械臂都必须有自己的 ROS 2 设备适配器。
+相机预览、ROS bag、数据审核和 LeRobot Studio 编辑；每种机械臂都必须有自己的 ROS 2 设备适配器。
 
 当前仓库只完成了 SO-101 适配。不要把另一台机械臂直接接到当前 `start.sh` 后启动：
 它会加载 SO-101 的串口、关节范围、控制器、标定文件和 Feetech 释力报文。
@@ -13,7 +13,7 @@
 - 网页能显示实时关节状态和两路相机预览。
 - 浏览器或本机控制命令经过新设备的安全限位、速度和加速度限制后执行。
 - “紧急停止并释放力”只作用于新设备，并且可在 ROS 2 控制器失效时执行。
-- 录制的 ROS bag 包含关节状态和原始相机图像，可以转换、回放和裁剪。
+- 录制的 ROS bag 包含关节状态和原始相机图像，可以转换、回放并在 LeRobot Studio 中编辑。
 
 先完成驱动、状态、限位和释力，再接入网页控制。不要把网页控制作为第一次驱动实机的工具。
 
@@ -87,7 +87,6 @@ ros2 control list_controllers
 - `robot_data_platform/frontend/src/composables/useWebSocket.ts`
 - `robot_data_platform/frontend/src/App.vue`
 - `robot_data_platform/robot-server/src/index.ts`
-- `robot_data_platform/bridge/rosbag_joint_states.py`
 - `robot_data_platform/bridge/rosbag_playback.py`
 
 不要仅在前端改标签。前端、桥接器、ROS 控制器、录制和回放必须使用同一份型号配置。
@@ -103,8 +102,8 @@ ros2 control list_controllers
 /camera2/image_raw              ROS bag 原始图像
 ```
 
-新设备已有相机话题时，优先在新设备的 launch 中重映射到这些规范话题。这样无需改网页、
-视频转换和裁剪逻辑。若必须使用不同名字或超过两路相机，需要同步更新 Robot Server 的
+新设备已有相机话题时，优先在新设备的 launch 中重映射到这些规范话题。这样无需改网页和
+视频转换逻辑。若必须使用不同名字或超过两路相机，需要同步更新 Robot Server 的
 `BAG_RECORD_TOPICS`、预览订阅和前端相机视图；不要只改录制话题。
 
 开始录制前确认原始图像确实在发布：
@@ -168,7 +167,7 @@ export BAG_RECORD_TOPICS="/joint_states,/my_arm_controller/commands,/camera1/ima
 4. 网页控制：检查状态值、百分比、单位和遥操作方向，不录制。
 5. 相机：确认预览用 compressed，录制用 raw，检查局域网延迟。
 6. 录制：录一段短 bag，检查关节状态、控制命令和 raw 图像话题。
-7. 回放与裁剪：转换视频、拖动时间轴、裁剪 ROS bag，并再次检查生成片段。
+7. 回放与编辑：检查录制视频和数据集，再用 LeRobot Studio 编辑数据。
 8. 回归：重新启动 SO-101 `start.sh`，确认原有设备仍可控制、录制和释力。
 
 任何一步发现关节名不一致、单位不清楚、限位缺失、急停不可用或 bag 缺少 raw 图像时，

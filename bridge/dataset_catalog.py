@@ -179,6 +179,7 @@ def video_quality(path: Path) -> dict:
 def trajectory_quality(frame: pd.DataFrame) -> dict:
     flags = []
     values = []
+    invalid_values = False
     for column in ("observation.state", "action"):
         if column not in frame:
             continue
@@ -186,19 +187,39 @@ def trajectory_quality(frame: pd.DataFrame) -> dict:
             if hasattr(value, "tolist"):
                 value = value.tolist()
             if isinstance(value, (list, tuple)):
-                values.append([float(item) for item in value])
+                try:
+                    vector = [float(item) for item in value]
+                except (TypeError, ValueError, OverflowError):
+                    invalid_values = True
+                    continue
+                if not vector:
+                    invalid_values = True
+                    continue
+                if values and len(vector) != len(values[0]):
+                    invalid_values = True
+                    continue
+                values.append(vector)
+            else:
+                invalid_values = True
     if len(values) >= 2:
         import numpy as np
         matrix = np.asarray(values, dtype=float)
+        if not np.isfinite(matrix).all():
+            flags.append({"code": "trajectory_non_finite", "level": "error", "label": "状态/动作包含非有限数值"})
+            return {"samples": len(values), "maxJump": None, "medianJump": None, "flags": flags}
         jumps = np.max(np.abs(np.diff(matrix, axis=0)), axis=1)
         median_jump = float(np.median(jumps))
         largest_jump = float(np.max(jumps))
         if largest_jump > 1.0 and largest_jump > max(0.2, median_jump * 8):
             flags.append({"code": "trajectory_jump", "level": "warning", "label": "状态/动作存在突变", "maxJump": round(largest_jump, 4)})
-        if not np.isfinite(matrix).all():
-            flags.append({"code": "trajectory_non_finite", "level": "error", "label": "状态/动作包含非有限数值"})
+        if invalid_values:
+            flags.append({"code": "trajectory_invalid", "level": "error", "label": "状态/动作包含无效或维度不一致的数据"})
         return {"samples": len(values), "maxJump": round(largest_jump, 4), "medianJump": round(median_jump, 4), "flags": flags}
-    return {"samples": len(values), "maxJump": None, "medianJump": None, "flags": [{"code": "trajectory_missing", "level": "warning", "label": "缺少状态/动作序列"}]}
+    if invalid_values:
+        flags.append({"code": "trajectory_invalid", "level": "error", "label": "状态/动作包含无效或维度不一致的数据"})
+    else:
+        flags.append({"code": "trajectory_missing", "level": "warning", "label": "缺少状态/动作序列"})
+    return {"samples": len(values), "maxJump": None, "medianJump": None, "flags": flags}
 
 
 def dataset_quality(dataset_root: Path) -> dict:
@@ -233,7 +254,13 @@ def dataset_quality(dataset_root: Path) -> dict:
                     value = episode_frame.iloc[index][column]
                     if hasattr(value, "tolist"):
                         value = value.tolist()
-                    signature_values.append(tuple(round(float(item), 4) for item in value) if isinstance(value, (list, tuple)) else str(value))
+                    if isinstance(value, (list, tuple)):
+                        try:
+                            signature_values.append(tuple(round(float(item), 4) for item in value))
+                        except (TypeError, ValueError, OverflowError):
+                            signature_values.append(repr(value)[:256])
+                    else:
+                        signature_values.append(str(value)[:256])
             signature = repr(signature_values)
             signatures.setdefault(signature, []).append(episode)
         episodes.append({"episode": episode, "frames": metadata.get("frames", 0), "flags": flags, "videoChecks": video_checks, "trajectory": trajectory, "score": max(0, 100 - sum(35 if flag.get("level") == "error" else 15 for flag in flags))})

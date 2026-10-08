@@ -564,7 +564,7 @@ async function writeV3Tasks(
         },
       ],
       attributes: {},
-      creator: { library: 'lerobot-studio', version: '1.0.0' },
+      creator: { library: 'robot-data-platform', version: '1.0.0' },
       pandas_version: '2.3.3',
     });
     const schema = new arrow.Schema(
@@ -634,7 +634,7 @@ async function writeV3Subtasks(
       },
     ],
     attributes: {},
-    creator: { library: 'lerobot-studio', version: '1.0.0' },
+    creator: { library: 'robot-data-platform', version: '1.0.0' },
     pandas_version: '2.3.3',
   });
   const schema = new arrow.Schema(

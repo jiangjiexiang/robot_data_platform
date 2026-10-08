@@ -1,10 +1,10 @@
 {
   "common": {
-    "appName": "LeRobot Studio",
-    "companyWebsite": "https://io-ai.tech/",
-    "companyName": "IO-AI.TECH",
-    "githubUrl": "https://github.com/ioai-tech/lerobot-studio",
-    "browseLeRobot": "浏览LeRobot",
+    "appName": "通用机械臂数据平台",
+    "companyWebsite": "https://github.com/jiangjiexiang/robot_data_platform",
+    "companyName": "通用机械臂数据平台",
+    "githubUrl": "https://github.com/jiangjiexiang/robot_data_platform",
+    "browseLeRobot": "浏览样例数据",
     "open": "浏览",
     "of": "共",
     "copy": "复制",
@@ -664,19 +664,19 @@
       "dropToOpen": "释放以浏览 LeRobot 数据集",
       "dropHint": "支持拖放本地文件夹或压缩包 (.zip, .tar, .tar.gz)",
       "dropDirectoryUnsupported": "此浏览器无法将“{{name}}”读取为文件夹。请使用“浏览本地目录”，或先压缩为 .zip/.tar 后再拖入。",
-      "attribution": "由 {{company}} 开发并开源"
+      "attribution": "{{company}}"
     }
   },
   "app": {
-    "title": "LeRobot Studio - 数据可视化",
+    "title": "通用机械臂数据平台 - 数据可视化",
     "enterRemoteArchiveUrl": "请输入远程压缩包 URL"
   },
   "seo": {
-    "title": "LeRobot Visualizer - LeRobot Studio",
-    "description": "LeRobot Visualizer 是由 IO-AI.TECH 打造的 LeRobot 数据可视化工具，支持在浏览器中同步查看视频、图表与原始特征。",
-    "keywords": "lerobot visualizer, lerobot 数据可视化, lerobot 数据集可视化, 机器人数据集查看器, lerobot studio",
-    "ogTitle": "LeRobot Visualizer - LeRobot Studio",
-    "ogDescription": "在浏览器中高效浏览 LeRobot 数据集：视频、图表与原始特征同步联动。"
+    "title": "通用机械臂数据平台 - 数据集可视化",
+    "description": "通用机械臂数据平台的数据集可视化工具，支持在浏览器中同步查看视频、图表与原始特征。",
+    "keywords": "lerobot 数据可视化, lerobot 数据集可视化, 机器人数据集查看器, robot dataset viewer, 机械臂数据平台",
+    "ogTitle": "通用机械臂数据平台 - 数据集可视化",
+    "ogDescription": "在浏览器中高效浏览数据集：视频、图表与原始特征同步联动。"
   },
   "navbar": {
     "github": "查看开源项目",

@@ -35,7 +35,7 @@ export interface DebugMetrics {
 }
 
 export interface RecordingStatus {
-  state: "idle" | "preparing" | "recording" | "saving" | "error";
+  state: "idle" | "preparing" | "recording" | "saving" | "ready" | "error";
   dataset: string | null;
   task: string | null;
   startedAt: number | null;
@@ -43,8 +43,9 @@ export interface RecordingStatus {
   path: string | null;
   error: string | null;
   plannedEpisodes: number;
+  completedEpisodes: number;
   episodeTime: number;
-  resetTime: number;
+  continuous: boolean;
   resume: boolean;
   lastResult: "saved" | "discarded" | null;
 }
@@ -66,7 +67,7 @@ export function useWebSocket() {
   const fatalError = ref<string | null>(null);
   const recording = ref<RecordingStatus>({
     state: "idle", dataset: null, task: null, startedAt: null,
-    episode: null, path: null, error: null, plannedEpisodes: 10, episodeTime: 20, resetTime: 5, resume: false,
+    episode: null, path: null, error: null, plannedEpisodes: 10, completedEpisodes: 0, episodeTime: 20, continuous: false, resume: false,
     lastResult: null,
   });
   const metrics = ref<DebugMetrics>({
@@ -636,8 +637,9 @@ export function useWebSocket() {
           path: typeof msg.path === "string" ? msg.path : null,
           error: typeof msg.error === "string" ? msg.error : null,
           plannedEpisodes: typeof msg.plannedEpisodes === "number" ? msg.plannedEpisodes : 10,
+          completedEpisodes: typeof msg.completedEpisodes === "number" ? msg.completedEpisodes : 0,
           episodeTime: typeof msg.episodeTime === "number" ? msg.episodeTime : 20,
-          resetTime: typeof msg.resetTime === "number" ? msg.resetTime : 5,
+          continuous: msg.continuous === true,
           resume: msg.resume === true,
           lastResult: msg.lastResult === "saved" || msg.lastResult === "discarded" ? msg.lastResult : null,
         };
@@ -668,8 +670,12 @@ export function useWebSocket() {
     // multi-second control latency.
     if (rtcControl?.readyState === "open") {
       try {
-        if (rtcControl.bufferedAmount <= 16 * 1024) rtcControl.send(encoded);
-        return;
+        if (rtcControl.bufferedAmount <= 16 * 1024) {
+          rtcControl.send(encoded);
+          return;
+        }
+        // A congested data channel must not silently drop a control command;
+        // let WebSocket carry it while the real-time channel drains.
       } catch {
         // Fall through to the WebSocket transport while RTC reconnects.
       }

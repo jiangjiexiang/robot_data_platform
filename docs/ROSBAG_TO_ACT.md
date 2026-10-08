@@ -11,9 +11,7 @@
 
 `action` 不可从 `/joint_states` 导出：它是机械臂滞后后的实际状态，不是示教者给出的目标动作。
 
-数据交付方式：采集端（Orin）通过网页「上传训练主机」把 rosbag 数据集原样 rsync 到
-训练主机（见 [上传数据集到训练主机](UPLOAD_TO_TRAINING_HOST.md)），转换和训练都在
-训练主机进行。在装有 ROS2、LeRobot 的环境中先做只读检查。当前相机源约 9 Hz，默认的 8 Hz 可避免重复/插值图像：
+在装有 ROS2、LeRobot 的训练环境中运行转换工具，并先做只读检查。当前相机源约 9 Hz，默认的 8 Hz 可避免重复/插值图像：
 
 ```bash
 source /opt/ros/humble/setup.bash
